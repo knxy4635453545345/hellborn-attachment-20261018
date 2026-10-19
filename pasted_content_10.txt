@@ -1,6 +1,6 @@
 -- ============================================================
--- MM2 HALLOWEEN AUTO FARM (VOANDO) + FLING NO MURDER
--- Limite: 50 moedas | Speed: 20 | Respawn-safe | STOP instantâneo
+-- MM2 HALLOWEEN AUTO FARM + FLING | Só moedas do mapa
+-- Speed: 20 | Limite: 50 | Coleta por baixo + firetouchinterest
 -- ============================================================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -14,11 +14,14 @@ local CONFIG = {
     AutoFarmEnabled = false,
     FlingPower = 1e5,
     FlingDuration = 0.6,
+    UnderY = 4,           -- quantos studs abaixo da moeda começa
+    RiseStep = 0.5,       -- passo de subida durante coleta
+    RiseDelay = 0.05,     -- delay entre passos
 }
 
 -- ================== ESTADO ==================
 local isRunning = false
-local runID = 0                -- ⚡ invalida loops antigos
+local runID = 0
 local blacklist = {}
 local BLACKLIST_TIME = 15
 local log = {}
@@ -40,8 +43,6 @@ local function getHum()
     if not c then return nil end
     return c:FindFirstChildOfClass("Humanoid")
 end
-
--- ⚡ cancela se parar OU se um novo INICIAR aconteceu
 local function shouldStop(myID)
     return not CONFIG.AutoFarmEnabled or myID ~= runID
 end
@@ -80,6 +81,14 @@ local function getPos(obj)
         local h = obj:FindFirstChild("Handle")
         return h and h.Position or nil
     end
+    return nil
+end
+
+local function getTouchPart(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Model") then return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart") end
+    if obj:IsA("Tool") then return obj:FindFirstChild("Handle") end
     return nil
 end
 
@@ -148,7 +157,7 @@ local function getNearestCoin()
     return nearest, shortest
 end
 
--- ================== VOO (cancela se parar) ==================
+-- ================== VOO ==================
 local function flyTo(targetPos, speed, myID)
     local hrp = getHRP()
     local hum = getHum()
@@ -156,7 +165,7 @@ local function flyTo(targetPos, speed, myID)
 
     local startPos = hrp.Position
     local dist = (targetPos - startPos).Magnitude
-    if dist < 1 then return true end
+    if dist < 0.5 then return true end
 
     local oldWS = hum.WalkSpeed
     hrp.Anchored = true
@@ -168,7 +177,6 @@ local function flyTo(targetPos, speed, myID)
     while true do
         task.wait(0.03)
         if shouldStop(myID) then
-            -- ⚡ parada imediata
             local cur = getHRP()
             if cur and cur.Parent then cur.Anchored = false end
             local h = getHum()
@@ -182,11 +190,121 @@ local function flyTo(targetPos, speed, myID)
         if a >= 1 then break end
     end
 
-    local finalHRP = getHRP()
-    local finalHum = getHum()
-    if finalHRP and finalHRP.Parent then finalHRP.Anchored = false end
-    if finalHum then finalHum.WalkSpeed = oldWS end
+    local fh = getHRP()
+    local fm = getHum()
+    if fh and fh.Parent then fh.Anchored = false end
+    if fm then fm.WalkSpeed = oldWS end
     return not shouldStop(myID)
+end
+
+-- ================== FORÇAR COLETA (firetouchinterest etc) ==================
+local function forceCollect(obj)
+    local hrp = getHRP()
+    if not hrp or not obj then return end
+    local part = getTouchPart(obj)
+    if not part then return end
+
+    -- garante CanTouch
+    pcall(function()
+        if sethiddenproperty then sethiddenproperty(part, "CanTouch", true) end
+    end)
+    pcall(function() part.CanTouch = true end)
+
+    -- firetouchinterest bidirecional (melhor método)
+    if firetouchinterest then
+        pcall(function()
+            firetouchinterest(hrp, part, 0)
+            task.wait(0.02)
+            firetouchinterest(hrp, part, 1)
+        end)
+        pcall(function()
+            firetouchinterest(part, hrp, 0)
+            task.wait(0.02)
+            firetouchinterest(part, hrp, 1)
+        end)
+    end
+
+    -- click detector
+    if fireclickdetector then
+        pcall(function()
+            local cd = obj:FindFirstChildOfClass("ClickDetector")
+                or (obj:IsA("Model") and obj:FindFirstChildWhichIsA("ClickDetector"))
+            if cd then fireclickdetector(cd) end
+        end)
+    end
+
+    -- proximity prompt
+    if fireproximityprompt then
+        pcall(function()
+            local pp = obj:FindFirstChildOfClass("ProximityPrompt")
+                or (obj:IsA("Model") and obj:FindFirstChildWhichIsA("ProximityPrompt"))
+            if pp then fireproximityprompt(pp) end
+        end)
+    end
+end
+
+-- ================== COLETA POR BAIXO ==================
+local function collectCoin(coin, myID)
+    local coinPos = getPos(coin)
+    if not coinPos then return false end
+
+    -- FASE 1: voar para baixo da moeda
+    local belowPos = coinPos - Vector3.new(0, CONFIG.UnderY, 0)
+    if not flyTo(belowPos, CONFIG.Speed, myID) then return false end
+    if shouldStop(myID) then return false end
+    if not coin.Parent then return true end
+
+    -- FASE 2: subir devagar atravessando a moeda, disparando firetouchinterest em cada passo
+    local hrp = getHRP()
+    if not hrp then return false end
+    pcall(function() hrp.Anchored = true end)
+    local hum = getHum()
+    local oldWS = hum and hum.WalkSpeed or 16
+    if hum then hum.WalkSpeed = 0 end
+
+    local steps = math.ceil(CONFIG.UnderY / CONFIG.RiseStep) + 2
+    for i = 0, steps do
+        if shouldStop(myID) then
+            local cur = getHRP()
+            if cur then cur.Anchored = false end
+            if hum then hum.WalkSpeed = oldWS end
+            return false
+        end
+        if not coin.Parent then
+            local cur = getHRP()
+            if cur then cur.Anchored = false end
+            if hum then hum.WalkSpeed = oldWS end
+            return true
+        end
+
+        local y = -CONFIG.UnderY + (i * CONFIG.RiseStep)
+        local newPos = coinPos + Vector3.new(0, y, 0)
+        local cur = getHRP()
+        if cur then
+            pcall(function() cur.CFrame = CFrame.new(newPos) end)
+        end
+        forceCollect(coin)
+        task.wait(CONFIG.RiseDelay)
+    end
+
+    -- FASE 3: re-tentativas extras com jitter lateral
+    for i = 1, 4 do
+        if shouldStop(myID) then break end
+        if not coin.Parent then break end
+        local jitter = Vector3.new(math.random(-10, 10) / 10, 0, math.random(-10, 10) / 10)
+        local cur = getHRP()
+        if cur then
+            pcall(function() cur.CFrame = CFrame.new(coinPos + jitter) end)
+        end
+        forceCollect(coin)
+        task.wait(0.05)
+    end
+
+    local cur = getHRP()
+    if cur then cur.Anchored = false end
+    if hum then hum.WalkSpeed = oldWS end
+
+    return not coin.Parent or not isRealCoinOnMap(coin)
 end
 
 -- ================== FLING ==================
@@ -221,10 +339,9 @@ local function flingTarget(targetChar)
 
     task.wait(CONFIG.FlingDuration)
     conn:Disconnect()
-
     pcall(function() bv:Destroy() end)
     pcall(function() bav:Destroy() end)
-    dbg("FLING aplicado em " .. (targetChar.Name or "?"))
+    dbg("FLING em " .. (targetChar.Name or "?"))
     return true
 end
 
@@ -235,24 +352,19 @@ local function isPlayerMurderer(player)
     if not char then return false end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return false end
-
-    local function checkForKnife(container)
-        if not container then return false end
-        for _, t in ipairs(container:GetChildren()) do
+    local function check(c)
+        if not c then return false end
+        for _, t in ipairs(c:GetChildren()) do
             if t:IsA("Tool") and t.Name:lower():find("knife") then return true end
         end
         return false
     end
-
-    if checkForKnife(player:FindFirstChild("Backpack")) then return true end
-    if checkForKnife(char) then return true end
-
+    if check(player:FindFirstChild("Backpack")) then return true end
+    if check(char) then return true end
     local r = player:FindFirstChild("Role")
     if r and r:IsA("StringValue") and r.Value:lower() == "murderer" then return true end
-
     return false
 end
-
 local function findMurderer()
     for _, p in ipairs(Players:GetPlayers()) do
         if isPlayerMurderer(p) then return p end
@@ -274,7 +386,7 @@ local function getRole()
     return "innocent"
 end
 
--- ================== AÇÃO AO ENCHER INVENTÁRIO (com check de cancelamento) ==================
+-- ================== AÇÃO AO ENCHER ==================
 local function executeRoleAction(myID)
     local role = getRole()
 
@@ -297,24 +409,21 @@ local function executeRoleAction(myID)
 
     local murderer = findMurderer()
     if not murderer then
-        dbg("Inventário cheio, mas murder não encontrado → aguardando")
+        dbg("Cheio, murder não encontrado → aguardando")
         return
     end
     local mchar = murderer.Character
     local mhrp = mchar and mchar:FindFirstChild("HumanoidRootPart")
     if not mhrp then return end
 
-    dbg("Inventário cheio → indo FLINGAR " .. murderer.Name)
+    dbg("Cheio → FLING em " .. murderer.Name)
     if not flyTo(mhrp.Position, CONFIG.Speed, myID) then return end
     task.wait(0.1)
     if shouldStop(myID) then return end
 
     if role == "sheriff" then
         local gun = LocalPlayer.Backpack and LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
-        if gun then
-            pcall(function() gun:Activate() end)
-            task.wait(0.1)
-        end
+        if gun then pcall(function() gun:Activate() end); task.wait(0.1) end
     end
 
     flingTarget(mchar)
@@ -332,7 +441,7 @@ local function executeRoleAction(myID)
     end
 end
 
--- ================== LOOP PRINCIPAL ==================
+-- ================== LOOP ==================
 local function stepFarm(myID)
     if shouldStop(myID) then return end
     if not getHRP() then task.wait(0.5); return end
@@ -345,26 +454,23 @@ local function stepFarm(myID)
 
     local coin, dist = getNearestCoin()
     if coin then
-        local pos = getPos(coin)
-        if pos then
-            dbg(string.format("Voando até moeda (%.0f studs)", dist or 0))
-            if not flyTo(pos, CONFIG.Speed, myID) then return end
-            task.wait(0.1)
-            if coin.Parent and isRealCoinOnMap(coin) then
-                blacklist[coin] = tick()
-                dbg("Moeda não coletada → blacklist")
-            else
-                dbg("Moeda coletada ✔")
-            end
+        dbg(string.format("Coletando moeda por baixo (%.0f studs)", dist or 0))
+        local ok = collectCoin(coin, myID)
+        if shouldStop(myID) then return end
+        if ok then
+            dbg("Moeda coletada ✔")
+        else
+            blacklist[coin] = tick()
+            dbg("Moeda não coletou → blacklist")
         end
+        task.wait(0.05)
     else
-        dbg("Nenhuma moeda spawnada, aguardando...")
+        dbg("Nenhuma moeda no mapa, aguardando...")
         task.wait(0.8)
     end
 end
 
 local function startLoop()
-    -- sempre cria uma nova geração (invalida a antiga)
     runID = runID + 1
     local myID = runID
     isRunning = true
@@ -385,10 +491,9 @@ local function startLoop()
     end)
 end
 
--- ⚡ STOP forçado
 local function stopLoop()
     CONFIG.AutoFarmEnabled = false
-    runID = runID + 1              -- invalida imediatamente o loop atual
+    runID = runID + 1
     isRunning = false
     local hrp = getHRP()
     if hrp and hrp.Parent then hrp.Anchored = false end
@@ -397,22 +502,17 @@ local function stopLoop()
     dbg("STOP forçado")
 end
 
--- ================== WATCHDOG (sempre atualizando) ==================
--- Loop infinito que nunca para: mantém estado limpo e recupera de erros
+-- ================== WATCHDOG ==================
 task.spawn(function()
     while true do
         task.wait(1)
         pcall(function()
-            -- Se o personagem existe mas está ancorado sem o farm estar voando, desancora
             if not CONFIG.AutoFarmEnabled then
                 local hrp = getHRP()
-                if hrp and hrp.Anchored then
-                    hrp.Anchored = false
-                end
+                if hrp and hrp.Anchored then hrp.Anchored = false end
             end
-            -- Se o player morreu/respawnou e o loop morreu, reinicia
             if CONFIG.AutoFarmEnabled and not isRunning then
-                dbg("Watchdog: loop morto → reiniciando")
+                dbg("Watchdog: reiniciando loop")
                 startLoop()
             end
         end)
@@ -421,17 +521,12 @@ end)
 
 -- ================== RESPAWN ==================
 LocalPlayer.CharacterAdded:Connect(function(char)
-    dbg("Respawn detectado → aguardando HRP")
+    dbg("Respawn → aguardando HRP")
     char:WaitForChild("HumanoidRootPart", 5)
     task.wait(0.5)
-    if CONFIG.AutoFarmEnabled and not isRunning then
-        dbg("Reiniciando farm no respawn")
-        startLoop()
-    end
+    if CONFIG.AutoFarmEnabled and not isRunning then startLoop() end
 end)
-
 LocalPlayer.CharacterRemoving:Connect(function()
-    dbg("Personagem morrendo/saindo")
     local hrp = getHRP()
     if hrp and hrp.Parent then hrp.Anchored = false end
 end)
@@ -455,9 +550,9 @@ local function createGUI()
     frame.Draggable = true
     frame.Parent = sg
     Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
-    local stroke = Instance.new("UIStroke", frame)
-    stroke.Color = Color3.fromRGB(255, 140, 0)
-    stroke.Thickness = 2
+    local st = Instance.new("UIStroke", frame)
+    st.Color = Color3.fromRGB(255, 140, 0)
+    st.Thickness = 2
 
     local title = Instance.new("TextLabel")
     title.Size = UDim2.new(1, 0, 0, 28)
@@ -482,18 +577,15 @@ local function createGUI()
     close.TextSize = 12
     close.Parent = title
     Instance.new("UICorner", close).CornerRadius = UDim.new(0, 4)
-    close.MouseButton1Click:Connect(function()
-        stopLoop()
-        sg:Destroy()
-    end)
+    close.MouseButton1Click:Connect(function() stopLoop(); sg:Destroy() end)
 
-    local function mkLabel(y, text, color)
+    local function mk(y, txt, col)
         local l = Instance.new("TextLabel")
         l.Size = UDim2.new(1, -20, 0, 20)
         l.Position = UDim2.new(0, 10, 0, y)
         l.BackgroundTransparency = 1
-        l.Text = text
-        l.TextColor3 = color
+        l.Text = txt
+        l.TextColor3 = col
         l.Font = Enum.Font.GothamMedium
         l.TextSize = 13
         l.TextXAlignment = Enum.TextXAlignment.Left
@@ -501,9 +593,9 @@ local function createGUI()
         return l
     end
 
-    local coinLbl = mkLabel(36, "Moedas: 0 / 50", Color3.fromRGB(255, 215, 0))
-    local roleLbl = mkLabel(58, "Papel: --", Color3.fromRGB(200, 200, 255))
-    local statusLbl = mkLabel(80, "Status: Parado", Color3.fromRGB(255, 100, 100))
+    local coinLbl = mk(36, "Moedas: 0 / 50", Color3.fromRGB(255, 215, 0))
+    local roleLbl = mk(58, "Papel: --", Color3.fromRGB(200, 200, 255))
+    local statusLbl = mk(80, "Status: Parado", Color3.fromRGB(255, 100, 100))
 
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(1, -20, 0, 34)
@@ -519,19 +611,13 @@ local function createGUI()
 
     btn.MouseButton1Click:Connect(function()
         if CONFIG.AutoFarmEnabled then
-            -- ⚡ PARAR
             stopLoop()
             btn.Text = "▶ INICIAR FARM"
             btn.BackgroundColor3 = Color3.fromRGB(50, 180, 80)
-            statusLbl.Text = "Status: Parado"
-            statusLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
         else
-            -- ▶ INICIAR
             CONFIG.AutoFarmEnabled = true
             btn.Text = "⏸ PARAR FARM"
             btn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
-            statusLbl.Text = "Status: Rodando"
-            statusLbl.TextColor3 = Color3.fromRGB(100, 255, 100)
             startLoop()
         end
     end)
@@ -548,7 +634,6 @@ local function createGUI()
     logLbl.Size = UDim2.new(1, -8, 1, -8)
     logLbl.Position = UDim2.new(0, 4, 0, 4)
     logLbl.BackgroundTransparency = 1
-    logLbl.Text = ""
     logLbl.TextColor3 = Color3.fromRGB(150, 255, 150)
     logLbl.Font = Enum.Font.Code
     logLbl.TextSize = 10
@@ -557,7 +642,6 @@ local function createGUI()
     logLbl.TextWrapped = true
     logLbl.Parent = logFrame
 
-    -- loop de atualização da GUI (sempre rodando)
     task.spawn(function()
         while sg.Parent do
             pcall(function()
@@ -566,11 +650,10 @@ local function createGUI()
                 local names = { innocent = "Inocente", sheriff = "Xerife", murderer = "Assassino" }
                 roleLbl.Text = "Papel: " .. (names[r] or r)
                 logLbl.Text = table.concat(log, "\n", 1, math.min(#log, 6))
-                -- sincroniza botão com estado real
                 if CONFIG.AutoFarmEnabled and isRunning then
                     statusLbl.Text = "Status: Rodando"
                     statusLbl.TextColor3 = Color3.fromRGB(100, 255, 100)
-                elseif not CONFIG.AutoFarmEnabled then
+                else
                     statusLbl.Text = "Status: Parado"
                     statusLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
                 end
@@ -580,6 +663,5 @@ local function createGUI()
     end)
 end
 
--- ================== INICIAR ==================
 createGUI()
 dbg("GUI carregada. Clique em INICIAR FARM.")
