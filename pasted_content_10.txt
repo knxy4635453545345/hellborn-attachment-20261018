@@ -1,6 +1,6 @@
 -- ============================================================
 -- MM2 HALLOWEEN FARM + FLING (lobby + round)
--- Speed: 20 | Limite: 50 | Velocity flight + coleta agressiva
+-- Speed: 20 | Noclip voando | Fling por teleporte
 -- ============================================================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -16,6 +16,7 @@ local CONFIG = {
     FlingPower = 1e5,
     FlingDuration = 0.6,
     UnderY = 4,
+    NoclipRefresh = 0.1,
 }
 
 -- ================== ESTADO ==================
@@ -23,6 +24,7 @@ local isRunning = false
 local runID = 0
 local blacklist = {}
 local BLACKLIST_TIME = 15
+local COLLECTING_COIN = false
 local log = {}
 local function dbg(msg)
     local t = string.format("[%s] %s", os.date("%H:%M:%S"), tostring(msg))
@@ -44,6 +46,31 @@ local function shouldStop(myID)
     return not CONFIG.AutoFarmEnabled or myID ~= runID
 end
 
+-- ================== NOCLIP ==================
+local function setNoclip(enabled)
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            pcall(function() part.CanCollide = not enabled end)
+        end
+    end
+end
+
+local function noclipLoop()
+    task.spawn(function()
+        while true do
+            task.wait(CONFIG.NoclipRefresh)
+            pcall(function()
+                if CONFIG.AutoFarmEnabled and not COLLECTING_COIN then
+                    setNoclip(true)
+                end
+            end)
+        end
+    end)
+end
+
+-- ================== CONTAGEM ==================
 local function getCoinCount()
     pcall(function()
         local c = LocalPlayer:FindFirstChild("Coins") or LocalPlayer:FindFirstChild("coins")
@@ -156,23 +183,19 @@ end
 
 -- ================== DETECTAR LOBBY ==================
 local function isInLobby()
-    -- 1) Marcadores explícitos
     for _, n in ipairs({"Lobby", "WaitingRoom", "LobbyMap"}) do
         if workspace:FindFirstChild(n) then return true end
     end
-    -- 2) Atributos de round
     for _, a in ipairs({"RoundActive", "InRound", "IsRoundActive", "RoundStarted"}) do
         local v = workspace:GetAttribute(a)
         if v == nil then v = ReplicatedStorage:GetAttribute(a) end
         if v ~= nil then return not v end
     end
-    -- 3) Existe alguma moeda no mapa? Se não → provavelmente lobby
     for _, obj in ipairs(workspace:GetDescendants()) do
         if isCoinName(obj.Name) and isRealCoinOnMap(obj) then
             return false
         end
     end
-    -- 4) Nenhum player tem papel ativo (Role)
     local anyRole = false
     for _, p in ipairs(Players:GetPlayers()) do
         local r = p:FindFirstChild("Role")
@@ -181,7 +204,7 @@ local function isInLobby()
     return not anyRole
 end
 
--- ================== VOO POR VELOCIDADE (física real) ==================
+-- ================== VOO POR VELOCIDADE (atravessa paredes via noclip) ==================
 local function flyTo(targetPos, speed, myID)
     local hrp = getHRP()
     if not hrp then return false end
@@ -200,32 +223,36 @@ local function flyTo(targetPos, speed, myID)
         if shouldStop(myID) then cleanup(); return false end
         local cur = getHRP()
         if not cur or not cur.Parent then cleanup(); return false end
-
         local delta = targetPos - cur.Position
         local dist = delta.Magnitude
         if dist < 1 then break end
-
-        local v = math.min(speed, dist * 8)
-        bv.Velocity = delta.Unit * v
+        bv.Velocity = delta.Unit * math.min(speed, dist * 8)
     end
-
     cleanup()
     return true
 end
 
--- ================== COLETA AGRESSIVA ==================
+-- ================== TELEPORTE (para o fling) ==================
+local function teleportTo(targetPos)
+    local hrp = getHRP()
+    if not hrp then return false end
+    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+    pcall(function() hrp.AssemblyAngularVelocity = Vector3.zero end)
+    pcall(function() hrp.CFrame = CFrame.new(targetPos) end)
+    return true
+end
+
+-- ================== FORÇAR COLETA ==================
 local function forceCollect(obj)
     local hrp = getHRP()
     local part = getTouchPart(obj)
     if not hrp or not part then return end
 
-    -- Garante colisão
     pcall(function() part.CanTouch = true end)
     pcall(function()
         if sethiddenproperty then sethiddenproperty(part, "CanTouch", true) end
     end)
 
-    -- MÉTODO 1: firetouchinterest (mais confiável)
     if firetouchinterest then
         pcall(function()
             firetouchinterest(hrp, part, 0)
@@ -237,14 +264,11 @@ local function forceCollect(obj)
         end)
     end
 
-    -- MÉTODO 2: firesignal (executor com getconnections/firesignal)
     if firesignal then
         pcall(function() firesignal(part.Touched, hrp) end)
         pcall(function() firesignal(hrp.Touched, part) end)
-        pcall(function() firesignal(part.TouchInterest) end)
     end
 
-    -- MÉTODO 3: getconnections:Fire
     if getconnections then
         pcall(function()
             for _, c in ipairs(getconnections(part.Touched)) do
@@ -258,73 +282,69 @@ local function forceCollect(obj)
         end)
     end
 
-    -- MÉTODO 4: Touched:Fire (raramente funciona, mas tenta)
     pcall(function() part.Touched:Fire(hrp) end)
     pcall(function() hrp.Touched:Fire(part) end)
 
-    -- MÉTODO 5: ClickDetector
-    local cd = part:FindFirstChildOfClass("ClickDetector")
-        or obj:FindFirstChildOfClass("ClickDetector")
-    if cd and fireclickdetector then
-        pcall(function() fireclickdetector(cd) end)
-    end
+    local cd = part:FindFirstChildOfClass("ClickDetector") or obj:FindFirstChildOfClass("ClickDetector")
+    if cd and fireclickdetector then pcall(function() fireclickdetector(cd) end) end
 
-    -- MÉTODO 6: ProximityPrompt
-    local pp = part:FindFirstChildOfClass("ProximityPrompt")
-        or obj:FindFirstChildOfClass("ProximityPrompt")
-    if pp and fireproximityprompt then
-        pcall(function() fireproximityprompt(pp) end)
-    end
+    local pp = part:FindFirstChildOfClass("ProximityPrompt") or obj:FindFirstChildOfClass("ProximityPrompt")
+    if pp and fireproximityprompt then pcall(function() fireproximityprompt(pp) end) end
 end
 
+-- ================== COLETA (noclip p/ paredes, colisão p/ moeda) ==================
 local function collectCoin(coin, myID)
     local coinPos = getPos(coin)
     if not coinPos then return false end
 
-    -- FASE 1: ir para baixo da moeda (física via velocity)
+    -- FASE 1: voar com noclip para baixo da moeda
     if not flyTo(coinPos - Vector3.new(0, CONFIG.UnderY, 0), CONFIG.Speed, myID) then return false end
     if shouldStop(myID) then return false end
     if not coin.Parent then return true end
 
-    -- FASE 2: subir atravessando com velocity (Touched dispara no servidor)
-    local hrp = getHRP()
-    if not hrp then return false end
-    local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-    bv.Parent = hrp
+    -- FASE 2: REATIVAR COLISÃO (só para essa moeda)
+    COLLECTING_COIN = true
+    task.wait(0.05)
+    setNoclip(false)
+    task.wait(0.05)
+    if shouldStop(myID) then COLLECTING_COIN = false; return false end
+    if not coin.Parent then COLLECTING_COIN = false; return true end
 
-    local steps = 12
+    -- FASE 3: subir devagar com colisão ativa + firetouchinterest
+    local steps = 10
     for i = 0, steps do
         if shouldStop(myID) then break end
         if not coin.Parent then break end
         local cur = getHRP()
         if not cur then break end
-
-        local y = -CONFIG.UnderY + (i / steps) * (CONFIG.UnderY * 2)
+        local y = -CONFIG.UnderY + (i / steps) * (CONFIG.UnderY + 1)
         local target = coinPos + Vector3.new(0, y, 0)
-        local delta = target - cur.Position
-        bv.Velocity = delta.Unit * math.min(CONFIG.Speed, delta.Magnitude * 10)
+        pcall(function() cur.CFrame = CFrame.new(target) end)
         forceCollect(coin)
-        task.wait(0.05)
+        task.wait(0.04)
     end
 
-    pcall(function() bv:Destroy() end)
-
-    -- FASE 3: jitter final com CFrame + todos métodos
-    for i = 1, 6 do
-        if shouldStop(myID) then break end
-        if not coin.Parent then break end
-        local cur = getHRP()
-        if not cur then break end
-        local jitter = Vector3.new(
-            math.random(-8, 8) / 10,
-            math.random(-5, 10) / 10,
-            math.random(-8, 8) / 10
-        )
-        pcall(function() cur.CFrame = CFrame.new(coinPos + jitter) end)
-        forceCollect(coin)
-        task.wait(0.05)
+    -- FASE 4: jitter horizontal
+    if coin.Parent then
+        for i = 1, 8 do
+            if shouldStop(myID) then break end
+            if not coin.Parent then break end
+            local cur = getHRP()
+            if not cur then break end
+            local jitter = Vector3.new(
+                math.random(-6, 6) / 10,
+                math.random(-3, 6) / 10,
+                math.random(-6, 6) / 10
+            )
+            pcall(function() cur.CFrame = CFrame.new(coinPos + jitter) end)
+            forceCollect(coin)
+            task.wait(0.04)
+        end
     end
+
+    -- FASE 5: reativar noclip
+    COLLECTING_COIN = false
+    setNoclip(true)
 
     return not coin.Parent or not isRealCoinOnMap(coin)
 end
@@ -406,10 +426,10 @@ local function getRole()
     return "innocent"
 end
 
--- ================== FLING NO MURDER (lobby ou inventário cheio) ==================
+-- ================== ATAQUE POR TELEPORTE ==================
 local function attackMurder(myID)
     local role = getRole()
-    if role == "murderer" then return end -- assassino não flinga a si mesmo
+    if role == "murderer" then return end
 
     local murderer = findMurderer()
     if not murderer then
@@ -420,27 +440,30 @@ local function attackMurder(myID)
     local mhrp = mchar and mchar:FindFirstChild("HumanoidRootPart")
     if not mhrp then return end
 
-    dbg("Indo FLINGAR " .. murderer.Name)
-    if not flyTo(mhrp.Position, CONFIG.Speed, myID) then return end
+    dbg("Teleportando até " .. murderer.Name .. " p/ fling")
+    -- TELEPORTE (atravessa paredes)
+    if not teleportTo(mhrp.Position) then return end
+    task.wait(0.05)
     if shouldStop(myID) then return end
-    task.wait(0.1)
 
     if role == "sheriff" then
         local gun = LocalPlayer.Backpack and LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
-        if gun then pcall(function() gun:Activate() end); task.wait(0.1) end
+        if gun then pcall(function() gun:Activate() end); task.wait(0.05) end
     end
 
     flingTarget(mchar)
 
+    -- re-tenta 3x com teleporte novo (caso murder ande)
     for i = 1, 3 do
-        task.wait(0.5)
+        task.wait(0.4)
         if shouldStop(myID) then return end
         if not mchar or not mchar.Parent then break end
         local h = mchar:FindFirstChildOfClass("Humanoid")
         if h and h.Health <= 0 then break end
         local th = mchar:FindFirstChild("HumanoidRootPart")
         if not th then break end
-        if not flyTo(th.Position, CONFIG.Speed, myID) then return end
+        teleportTo(th.Position)
+        task.wait(0.05)
         flingTarget(mchar)
     end
 end
@@ -450,21 +473,21 @@ local function stepFarm(myID)
     if shouldStop(myID) then return end
     if not getHRP() then task.wait(0.5); return end
 
-    -- 🏠 LOBBY → sempre fling murder (não precisa de moedas cheias)
+    -- 🏠 LOBBY → teleporta e flinga o murder
     if isInLobby() then
         local murderer = findMurderer()
         if murderer then
-            dbg("Lobby detectado → fling no murder")
+            dbg("Lobby → teleporte + fling")
             attackMurder(myID)
             task.wait(1.5)
         else
-            dbg("Lobby, mas murder não encontrado")
+            dbg("Lobby, murder não encontrado")
             task.wait(1.5)
         end
         return
     end
 
-    -- 🎮 ROUND → inventário cheio? fling murder
+    -- 🎮 ROUND → cheio? fling
     if isInventoryFull() then
         attackMurder(myID)
         task.wait(CONFIG.CheckInterval)
@@ -474,7 +497,7 @@ local function stepFarm(myID)
     -- 🪙 ROUND → coletar moedas
     local coin, dist = getNearestCoin()
     if coin then
-        dbg(string.format("Coletando moeda (%.0f studs)", dist or 0))
+        dbg(string.format("Coletando (%.0f studs)", dist or 0))
         local ok = collectCoin(coin, myID)
         if shouldStop(myID) then return end
         if ok then
@@ -485,7 +508,7 @@ local function stepFarm(myID)
         end
         task.wait(0.05)
     else
-        dbg("Nenhuma moeda no mapa, aguardando...")
+        dbg("Nenhuma moeda no mapa...")
         task.wait(0.8)
     end
 end
@@ -515,10 +538,12 @@ local function stopLoop()
     CONFIG.AutoFarmEnabled = false
     runID = runID + 1
     isRunning = false
+    COLLECTING_COIN = false
     local hrp = getHRP()
     if hrp and hrp.Parent then hrp.Anchored = false end
     local hum = getHum()
     if hum then hum.WalkSpeed = 16 end
+    setNoclip(false)
     dbg("STOP forçado")
 end
 
@@ -550,6 +575,9 @@ LocalPlayer.CharacterRemoving:Connect(function()
     local hrp = getHRP()
     if hrp and hrp.Parent then hrp.Anchored = false end
 end)
+
+-- ================== INICIA NOCLIP LOOP ==================
+noclipLoop()
 
 -- ================== GUI ==================
 local function createGUI()
