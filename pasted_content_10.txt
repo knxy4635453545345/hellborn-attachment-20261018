@@ -1,0 +1,329 @@
+-- ============================================================
+-- MM2 HALLOWEEN AUTO FARM (VOANDO) + GUI + LÓGICA DE INVENTÁRIO
+-- Limite de inventário: 50 moedas
+-- ============================================================
+-- AVISO: Use apenas se você entender os riscos de banimento.
+-- ============================================================
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+
+-- ================== CONFIGURAÇÕES ==================
+local CONFIG = {
+    TweenSpeed = 12,          -- Studs por segundo (recomendado: 10-15)
+    MaxCoins = 50,            -- ✅ LIMITE DE 50 MOEDAS
+    CheckInterval = 1.5,
+    AutoFarmEnabled = false,  -- Começa desligado; ligue pela GUI
+}
+
+-- ================== ESTADO ==================
+local currentTween = nil
+local coinsCollected = 0
+local isRunning = false
+
+-- ================== FUNÇÕES AUXILIARES ==================
+local function getCoinCount()
+    local coins = LocalPlayer:FindFirstChild("Coins") or LocalPlayer:FindFirstChild("coins")
+    if coins and typeof(coins) == "ValueBase" then
+        return coins.Value
+    end
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then
+        local count = 0
+        for _, item in ipairs(backpack:GetChildren()) do
+            if item.Name:lower():find("coin") then
+                count = count + 1
+            end
+        end
+        return count
+    end
+    return 0
+end
+
+local function isInventoryFull()
+    return getCoinCount() >= CONFIG.MaxCoins
+end
+
+local function flyTo(position, speed)
+    if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+        return
+    end
+    local hrp = LocalPlayer.Character.HumanoidRootPart
+    local distance = (position - hrp.Position).Magnitude
+    local duration = distance / speed
+    if currentTween then
+        currentTween:Cancel()
+    end
+    local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Linear)
+    currentTween = TweenService:Create(hrp, tweenInfo, { CFrame = CFrame.new(position) })
+    currentTween:Play()
+    currentTween.Completed:Wait()
+end
+
+local function getNearestCoin()
+    local nearest = nil
+    local shortestDist = math.huge
+    local hrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.Name:lower():find("coin") then
+            local dist = (obj.Position - hrp.Position).Magnitude
+            if dist < shortestDist then
+                shortestDist = dist
+                nearest = obj
+            end
+        end
+    end
+    return nearest
+end
+
+local function getRole()
+    local roleObj = LocalPlayer:FindFirstChild("Role") or workspace:FindFirstChild(LocalPlayer.Name .. "_Role")
+    if roleObj and roleObj:IsA("StringValue") then
+        return roleObj.Value:lower()
+    end
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if backpack then
+        for _, tool in ipairs(backpack:GetChildren()) do
+            if tool.Name:lower():find("knife") then return "murderer" end
+            if tool.Name:lower():find("gun") then return "sheriff" end
+        end
+    end
+    return "innocent"
+end
+
+-- ================== AÇÃO POR PAPEL ==================
+local function executeRoleAction()
+    local role = getRole()
+
+    if role == "sheriff" and isInventoryFull() then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                local char = player.Character
+                if char then
+                    local isMurderer = false
+                    local bp = char:FindFirstChild("Backpack")
+                    if bp then
+                        for _, tool in ipairs(bp:GetChildren()) do
+                            if tool.Name:lower():find("knife") then isMurderer = true end
+                        end
+                    end
+                    if isMurderer then
+                        local targetHrp = char:FindFirstChild("HumanoidRootPart")
+                        if targetHrp then
+                            flyTo(targetHrp.Position, CONFIG.TweenSpeed)
+                            local gun = LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
+                            if gun then gun:Activate() end
+                        end
+                        break
+                    end
+                end
+            end
+        end
+
+    elseif role == "murderer" and isInventoryFull() then
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                local targetHrp = player.Character:FindFirstChild("HumanoidRootPart")
+                if targetHrp then
+                    flyTo(targetHrp.Position, CONFIG.TweenSpeed)
+                    local knife = LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
+                    if knife then knife:Activate() end
+                    task.wait(0.5)
+                end
+            end
+        end
+    end
+end
+
+-- ================== LOOP PRINCIPAL ==================
+local function startFarmLoop()
+    if isRunning then return end
+    isRunning = true
+    task.spawn(function()
+        while CONFIG.AutoFarmEnabled do
+            if not isInventoryFull() then
+                local coin = getNearestCoin()
+                if coin then
+                    flyTo(coin.Position, CONFIG.TweenSpeed)
+                    coinsCollected = coinsCollected + 1
+                    task.wait(0.3)
+                else
+                    task.wait(1)
+                end
+            else
+                executeRoleAction()
+                task.wait(CONFIG.CheckInterval)
+            end
+            RunService.Heartbeat:Wait()
+        end
+        isRunning = false
+    end)
+end
+
+-- ================== GUI ==================
+local function createGUI()
+    -- Remove GUI antiga se existir
+    local old = LocalPlayer.PlayerGui:FindFirstChild("MM2FarmGui")
+    if old then old:Destroy() end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "MM2FarmGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+    -- Frame principal
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 240, 0, 220)
+    frame.Position = UDim2.new(0, 20, 0, 80)
+    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = frame
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(255, 140, 0)
+    stroke.Thickness = 2
+    stroke.Parent = frame
+
+    -- Título
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, 0, 0, 28)
+    title.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
+    title.BackgroundTransparency = 0.15
+    title.BorderSizePixel = 0
+    title.Text = "🎃 MM2 Farm"
+    title.TextColor3 = Color3.fromRGB(255, 255, 255)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 15
+    title.Parent = frame
+
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 8)
+    titleCorner.Parent = title
+
+    -- Label moedas
+    local coinLabel = Instance.new("TextLabel")
+    coinLabel.Name = "CoinLabel"
+    coinLabel.Size = UDim2.new(1, -20, 0, 22)
+    coinLabel.Position = UDim2.new(0, 10, 0, 36)
+    coinLabel.BackgroundTransparency = 1
+    coinLabel.Text = "Moedas: 0 / 50"
+    coinLabel.TextColor3 = Color3.fromRGB(255, 215, 0)
+    coinLabel.Font = Enum.Font.GothamMedium
+    coinLabel.TextSize = 14
+    coinLabel.TextXAlignment = Enum.TextXAlignment.Left
+    coinLabel.Parent = frame
+
+    -- Label papel
+    local roleLabel = Instance.new("TextLabel")
+    roleLabel.Name = "RoleLabel"
+    roleLabel.Size = UDim2.new(1, -20, 0, 22)
+    roleLabel.Position = UDim2.new(0, 10, 0, 60)
+    roleLabel.BackgroundTransparency = 1
+    roleLabel.Text = "Papel: --"
+    roleLabel.TextColor3 = Color3.fromRGB(200, 200, 255)
+    roleLabel.Font = Enum.Font.GothamMedium
+    roleLabel.TextSize = 14
+    roleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    roleLabel.Parent = frame
+
+    -- Label status
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Name = "StatusLabel"
+    statusLabel.Size = UDim2.new(1, -20, 0, 22)
+    statusLabel.Position = UDim2.new(0, 10, 0, 84)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Text = "Status: Parado"
+    statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    statusLabel.Font = Enum.Font.GothamMedium
+    statusLabel.TextSize = 14
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.Parent = frame
+
+    -- Botão ligar/desligar
+    local toggleBtn = Instance.new("TextButton")
+    toggleBtn.Name = "ToggleBtn"
+    toggleBtn.Size = UDim2.new(1, -20, 0, 32)
+    toggleBtn.Position = UDim2.new(0, 10, 0, 115)
+    toggleBtn.BackgroundColor3 = Color3.fromRGB(50, 180, 80)
+    toggleBtn.BorderSizePixel = 0
+    toggleBtn.Text = "▶ INICIAR FARM"
+    toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleBtn.Font = Enum.Font.GothamBold
+    toggleBtn.TextSize = 13
+    toggleBtn.Parent = frame
+
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 6)
+    btnCorner.Parent = toggleBtn
+
+    -- Botão fechar
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 22, 0, 22)
+    closeBtn.Position = UDim2.new(1, -26, 0, 3)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "X"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 12
+    closeBtn.Parent = title
+
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 4)
+    closeCorner.Parent = closeBtn
+
+    closeBtn.MouseButton1Click:Connect(function()
+        screenGui:Destroy()
+    end)
+
+    -- Ação do botão toggle
+    toggleBtn.MouseButton1Click:Connect(function()
+        CONFIG.AutoFarmEnabled = not CONFIG.AutoFarmEnabled
+        if CONFIG.AutoFarmEnabled then
+            toggleBtn.Text = "⏸ PARAR FARM"
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+            statusLabel.Text = "Status: Rodando"
+            statusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+            startFarmLoop()
+        else
+            toggleBtn.Text = "▶ INICIAR FARM"
+            toggleBtn.BackgroundColor3 = Color3.fromRGB(50, 180, 80)
+            statusLabel.Text = "Status: Parado"
+            statusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+        end
+    end)
+
+    -- Loop de atualização da GUI
+    task.spawn(function()
+        while screenGui.Parent do
+            local ok, count = pcall(getCoinCount)
+            if ok then
+                coinLabel.Text = string.format("Moedas: %d / %d", count, CONFIG.MaxCoins)
+            end
+            local role = getRole()
+            local roleNames = { innocent = "Inocente", sheriff = "Xerife", murderer = "Assassino" }
+            roleLabel.Text = "Papel: " .. (roleNames[role] or role)
+            task.wait(0.5)
+        end
+    end)
+end
+
+-- ================== INICIALIZAÇÃO ==================
+createGUI()
+
+-- ================== COMANDOS EXTRAS ==================
+-- Para manipular via console:
+-- _G.MM2Farm = CONFIG          (ver config)
+-- CONFIG.MaxCoins = 50         (ajustar limite)
+-- CONFIG.TweenSpeed = 12       (ajustar velocidade)
