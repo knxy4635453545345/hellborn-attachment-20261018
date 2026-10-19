@@ -1,12 +1,13 @@
 -- ============================================================
--- MM2 HALLOWEEN AUTO FARM + FLING | Só moedas do mapa
--- Speed: 20 | Limite: 50 | Coleta por baixo + firetouchinterest
+-- MM2 HALLOWEEN FARM + FLING (lobby + round)
+-- Speed: 20 | Limite: 50 | Velocity flight + coleta agressiva
 -- ============================================================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 
--- ================== CONFIGURAÇÕES ==================
+-- ================== CONFIG ==================
 local CONFIG = {
     Speed = 20,
     MaxCoins = 50,
@@ -14,9 +15,7 @@ local CONFIG = {
     AutoFarmEnabled = false,
     FlingPower = 1e5,
     FlingDuration = 0.6,
-    UnderY = 4,           -- quantos studs abaixo da moeda começa
-    RiseStep = 0.5,       -- passo de subida durante coleta
-    RiseDelay = 0.05,     -- delay entre passos
+    UnderY = 4,
 }
 
 -- ================== ESTADO ==================
@@ -35,13 +34,11 @@ end
 -- ================== HELPERS ==================
 local function getHRP()
     local c = LocalPlayer.Character
-    if not c then return nil end
-    return c:FindFirstChild("HumanoidRootPart")
+    return c and c:FindFirstChild("HumanoidRootPart")
 end
 local function getHum()
     local c = LocalPlayer.Character
-    if not c then return nil end
-    return c:FindFirstChildOfClass("Humanoid")
+    return c and c:FindFirstChildOfClass("Humanoid")
 end
 local function shouldStop(myID)
     return not CONFIG.AutoFarmEnabled or myID ~= runID
@@ -110,7 +107,7 @@ local function isRealCoinOnMap(obj)
         if cur:IsA("Backpack") then return false end
         if cur:IsA("PlayerGui") then return false end
         if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return false end
-        if cur == game:GetService("ReplicatedStorage") then return false end
+        if cur == ReplicatedStorage then return false end
         if cur == game:GetService("ServerStorage") then return false end
         if cur == game:GetService("StarterPack") then return false end
         if cur == game:GetService("Lighting") then return false end
@@ -157,152 +154,177 @@ local function getNearestCoin()
     return nearest, shortest
 end
 
--- ================== VOO ==================
+-- ================== DETECTAR LOBBY ==================
+local function isInLobby()
+    -- 1) Marcadores explícitos
+    for _, n in ipairs({"Lobby", "WaitingRoom", "LobbyMap"}) do
+        if workspace:FindFirstChild(n) then return true end
+    end
+    -- 2) Atributos de round
+    for _, a in ipairs({"RoundActive", "InRound", "IsRoundActive", "RoundStarted"}) do
+        local v = workspace:GetAttribute(a)
+        if v == nil then v = ReplicatedStorage:GetAttribute(a) end
+        if v ~= nil then return not v end
+    end
+    -- 3) Existe alguma moeda no mapa? Se não → provavelmente lobby
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if isCoinName(obj.Name) and isRealCoinOnMap(obj) then
+            return false
+        end
+    end
+    -- 4) Nenhum player tem papel ativo (Role)
+    local anyRole = false
+    for _, p in ipairs(Players:GetPlayers()) do
+        local r = p:FindFirstChild("Role")
+        if r and r:IsA("StringValue") and r.Value ~= "" then anyRole = true; break end
+    end
+    return not anyRole
+end
+
+-- ================== VOO POR VELOCIDADE (física real) ==================
 local function flyTo(targetPos, speed, myID)
     local hrp = getHRP()
-    local hum = getHum()
-    if not hrp or not hum then return false end
+    if not hrp then return false end
 
-    local startPos = hrp.Position
-    local dist = (targetPos - startPos).Magnitude
-    if dist < 0.5 then return true end
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    bv.Velocity = Vector3.zero
+    bv.Parent = hrp
 
-    local oldWS = hum.WalkSpeed
-    hrp.Anchored = true
-    hum.WalkSpeed = 0
-
-    local dur = dist / math.max(speed, 1)
-    local t0 = tick()
+    local function cleanup()
+        pcall(function() bv:Destroy() end)
+    end
 
     while true do
         task.wait(0.03)
-        if shouldStop(myID) then
-            local cur = getHRP()
-            if cur and cur.Parent then cur.Anchored = false end
-            local h = getHum()
-            if h then h.WalkSpeed = oldWS end
-            return false
-        end
+        if shouldStop(myID) then cleanup(); return false end
         local cur = getHRP()
-        if not cur or not cur.Parent then break end
-        local a = math.min((tick() - t0) / dur, 1)
-        cur.CFrame = CFrame.new(startPos:Lerp(targetPos, a))
-        if a >= 1 then break end
+        if not cur or not cur.Parent then cleanup(); return false end
+
+        local delta = targetPos - cur.Position
+        local dist = delta.Magnitude
+        if dist < 1 then break end
+
+        local v = math.min(speed, dist * 8)
+        bv.Velocity = delta.Unit * v
     end
 
-    local fh = getHRP()
-    local fm = getHum()
-    if fh and fh.Parent then fh.Anchored = false end
-    if fm then fm.WalkSpeed = oldWS end
-    return not shouldStop(myID)
+    cleanup()
+    return true
 end
 
--- ================== FORÇAR COLETA (firetouchinterest etc) ==================
+-- ================== COLETA AGRESSIVA ==================
 local function forceCollect(obj)
     local hrp = getHRP()
-    if not hrp or not obj then return end
     local part = getTouchPart(obj)
-    if not part then return end
+    if not hrp or not part then return end
 
-    -- garante CanTouch
+    -- Garante colisão
+    pcall(function() part.CanTouch = true end)
     pcall(function()
         if sethiddenproperty then sethiddenproperty(part, "CanTouch", true) end
     end)
-    pcall(function() part.CanTouch = true end)
 
-    -- firetouchinterest bidirecional (melhor método)
+    -- MÉTODO 1: firetouchinterest (mais confiável)
     if firetouchinterest then
         pcall(function()
             firetouchinterest(hrp, part, 0)
-            task.wait(0.02)
-            firetouchinterest(hrp, part, 1)
+            firetouchinterest(part, hrp, 0)
         end)
         pcall(function()
-            firetouchinterest(part, hrp, 0)
-            task.wait(0.02)
+            firetouchinterest(hrp, part, 1)
             firetouchinterest(part, hrp, 1)
         end)
     end
 
-    -- click detector
-    if fireclickdetector then
+    -- MÉTODO 2: firesignal (executor com getconnections/firesignal)
+    if firesignal then
+        pcall(function() firesignal(part.Touched, hrp) end)
+        pcall(function() firesignal(hrp.Touched, part) end)
+        pcall(function() firesignal(part.TouchInterest) end)
+    end
+
+    -- MÉTODO 3: getconnections:Fire
+    if getconnections then
         pcall(function()
-            local cd = obj:FindFirstChildOfClass("ClickDetector")
-                or (obj:IsA("Model") and obj:FindFirstChildWhichIsA("ClickDetector"))
-            if cd then fireclickdetector(cd) end
+            for _, c in ipairs(getconnections(part.Touched)) do
+                pcall(function() c:Fire(hrp) end)
+            end
+        end)
+        pcall(function()
+            for _, c in ipairs(getconnections(hrp.Touched)) do
+                pcall(function() c:Fire(part) end)
+            end
         end)
     end
 
-    -- proximity prompt
-    if fireproximityprompt then
-        pcall(function()
-            local pp = obj:FindFirstChildOfClass("ProximityPrompt")
-                or (obj:IsA("Model") and obj:FindFirstChildWhichIsA("ProximityPrompt"))
-            if pp then fireproximityprompt(pp) end
-        end)
+    -- MÉTODO 4: Touched:Fire (raramente funciona, mas tenta)
+    pcall(function() part.Touched:Fire(hrp) end)
+    pcall(function() hrp.Touched:Fire(part) end)
+
+    -- MÉTODO 5: ClickDetector
+    local cd = part:FindFirstChildOfClass("ClickDetector")
+        or obj:FindFirstChildOfClass("ClickDetector")
+    if cd and fireclickdetector then
+        pcall(function() fireclickdetector(cd) end)
+    end
+
+    -- MÉTODO 6: ProximityPrompt
+    local pp = part:FindFirstChildOfClass("ProximityPrompt")
+        or obj:FindFirstChildOfClass("ProximityPrompt")
+    if pp and fireproximityprompt then
+        pcall(function() fireproximityprompt(pp) end)
     end
 end
 
--- ================== COLETA POR BAIXO ==================
 local function collectCoin(coin, myID)
     local coinPos = getPos(coin)
     if not coinPos then return false end
 
-    -- FASE 1: voar para baixo da moeda
-    local belowPos = coinPos - Vector3.new(0, CONFIG.UnderY, 0)
-    if not flyTo(belowPos, CONFIG.Speed, myID) then return false end
+    -- FASE 1: ir para baixo da moeda (física via velocity)
+    if not flyTo(coinPos - Vector3.new(0, CONFIG.UnderY, 0), CONFIG.Speed, myID) then return false end
     if shouldStop(myID) then return false end
     if not coin.Parent then return true end
 
-    -- FASE 2: subir devagar atravessando a moeda, disparando firetouchinterest em cada passo
+    -- FASE 2: subir atravessando com velocity (Touched dispara no servidor)
     local hrp = getHRP()
     if not hrp then return false end
-    pcall(function() hrp.Anchored = true end)
-    local hum = getHum()
-    local oldWS = hum and hum.WalkSpeed or 16
-    if hum then hum.WalkSpeed = 0 end
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    bv.Parent = hrp
 
-    local steps = math.ceil(CONFIG.UnderY / CONFIG.RiseStep) + 2
+    local steps = 12
     for i = 0, steps do
-        if shouldStop(myID) then
-            local cur = getHRP()
-            if cur then cur.Anchored = false end
-            if hum then hum.WalkSpeed = oldWS end
-            return false
-        end
-        if not coin.Parent then
-            local cur = getHRP()
-            if cur then cur.Anchored = false end
-            if hum then hum.WalkSpeed = oldWS end
-            return true
-        end
-
-        local y = -CONFIG.UnderY + (i * CONFIG.RiseStep)
-        local newPos = coinPos + Vector3.new(0, y, 0)
-        local cur = getHRP()
-        if cur then
-            pcall(function() cur.CFrame = CFrame.new(newPos) end)
-        end
-        forceCollect(coin)
-        task.wait(CONFIG.RiseDelay)
-    end
-
-    -- FASE 3: re-tentativas extras com jitter lateral
-    for i = 1, 4 do
         if shouldStop(myID) then break end
         if not coin.Parent then break end
-        local jitter = Vector3.new(math.random(-10, 10) / 10, 0, math.random(-10, 10) / 10)
         local cur = getHRP()
-        if cur then
-            pcall(function() cur.CFrame = CFrame.new(coinPos + jitter) end)
-        end
+        if not cur then break end
+
+        local y = -CONFIG.UnderY + (i / steps) * (CONFIG.UnderY * 2)
+        local target = coinPos + Vector3.new(0, y, 0)
+        local delta = target - cur.Position
+        bv.Velocity = delta.Unit * math.min(CONFIG.Speed, delta.Magnitude * 10)
         forceCollect(coin)
         task.wait(0.05)
     end
 
-    local cur = getHRP()
-    if cur then cur.Anchored = false end
-    if hum then hum.WalkSpeed = oldWS end
+    pcall(function() bv:Destroy() end)
+
+    -- FASE 3: jitter final com CFrame + todos métodos
+    for i = 1, 6 do
+        if shouldStop(myID) then break end
+        if not coin.Parent then break end
+        local cur = getHRP()
+        if not cur then break end
+        local jitter = Vector3.new(
+            math.random(-8, 8) / 10,
+            math.random(-5, 10) / 10,
+            math.random(-8, 8) / 10
+        )
+        pcall(function() cur.CFrame = CFrame.new(coinPos + jitter) end)
+        forceCollect(coin)
+        task.wait(0.05)
+    end
 
     return not coin.Parent or not isRealCoinOnMap(coin)
 end
@@ -341,7 +363,7 @@ local function flingTarget(targetChar)
     conn:Disconnect()
     pcall(function() bv:Destroy() end)
     pcall(function() bav:Destroy() end)
-    dbg("FLING em " .. (targetChar.Name or "?"))
+    dbg("FLING → " .. (targetChar.Name or "?"))
     return true
 end
 
@@ -350,8 +372,6 @@ local function isPlayerMurderer(player)
     if not player or player == LocalPlayer then return false end
     local char = player.Character
     if not char then return false end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
     local function check(c)
         if not c then return false end
         for _, t in ipairs(c:GetChildren()) do
@@ -386,40 +406,24 @@ local function getRole()
     return "innocent"
 end
 
--- ================== AÇÃO AO ENCHER ==================
-local function executeRoleAction(myID)
+-- ================== FLING NO MURDER (lobby ou inventário cheio) ==================
+local function attackMurder(myID)
     local role = getRole()
-
-    if role == "murderer" then
-        dbg("Assassino cheio → matando todos")
-        for _, p in ipairs(Players:GetPlayers()) do
-            if shouldStop(myID) then return end
-            if p ~= LocalPlayer and p.Character then
-                local th = p.Character:FindFirstChild("HumanoidRootPart")
-                if th then
-                    if not flyTo(th.Position, CONFIG.Speed, myID) then return end
-                    local k = LocalPlayer.Backpack and LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
-                    if k then k:Activate() end
-                    task.wait(0.4)
-                end
-            end
-        end
-        return
-    end
+    if role == "murderer" then return end -- assassino não flinga a si mesmo
 
     local murderer = findMurderer()
     if not murderer then
-        dbg("Cheio, murder não encontrado → aguardando")
+        dbg("Murder não encontrado")
         return
     end
     local mchar = murderer.Character
     local mhrp = mchar and mchar:FindFirstChild("HumanoidRootPart")
     if not mhrp then return end
 
-    dbg("Cheio → FLING em " .. murderer.Name)
+    dbg("Indo FLINGAR " .. murderer.Name)
     if not flyTo(mhrp.Position, CONFIG.Speed, myID) then return end
-    task.wait(0.1)
     if shouldStop(myID) then return end
+    task.wait(0.1)
 
     if role == "sheriff" then
         local gun = LocalPlayer.Backpack and LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
@@ -441,20 +445,36 @@ local function executeRoleAction(myID)
     end
 end
 
--- ================== LOOP ==================
+-- ================== LOOP PRINCIPAL ==================
 local function stepFarm(myID)
     if shouldStop(myID) then return end
     if not getHRP() then task.wait(0.5); return end
 
+    -- 🏠 LOBBY → sempre fling murder (não precisa de moedas cheias)
+    if isInLobby() then
+        local murderer = findMurderer()
+        if murderer then
+            dbg("Lobby detectado → fling no murder")
+            attackMurder(myID)
+            task.wait(1.5)
+        else
+            dbg("Lobby, mas murder não encontrado")
+            task.wait(1.5)
+        end
+        return
+    end
+
+    -- 🎮 ROUND → inventário cheio? fling murder
     if isInventoryFull() then
-        executeRoleAction(myID)
+        attackMurder(myID)
         task.wait(CONFIG.CheckInterval)
         return
     end
 
+    -- 🪙 ROUND → coletar moedas
     local coin, dist = getNearestCoin()
     if coin then
-        dbg(string.format("Coletando moeda por baixo (%.0f studs)", dist or 0))
+        dbg(string.format("Coletando moeda (%.0f studs)", dist or 0))
         local ok = collectCoin(coin, myID)
         if shouldStop(myID) then return end
         if ok then
@@ -512,7 +532,7 @@ task.spawn(function()
                 if hrp and hrp.Anchored then hrp.Anchored = false end
             end
             if CONFIG.AutoFarmEnabled and not isRunning then
-                dbg("Watchdog: reiniciando loop")
+                dbg("Watchdog: reiniciando")
                 startLoop()
             end
         end)
@@ -542,7 +562,7 @@ local function createGUI()
     sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 250, 0, 260)
+    frame.Size = UDim2.new(0, 260, 0, 280)
     frame.Position = UDim2.new(0, 20, 0, 80)
     frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
     frame.BorderSizePixel = 0
@@ -595,11 +615,12 @@ local function createGUI()
 
     local coinLbl = mk(36, "Moedas: 0 / 50", Color3.fromRGB(255, 215, 0))
     local roleLbl = mk(58, "Papel: --", Color3.fromRGB(200, 200, 255))
-    local statusLbl = mk(80, "Status: Parado", Color3.fromRGB(255, 100, 100))
+    local lobbyLbl = mk(80, "Local: --", Color3.fromRGB(180, 180, 255))
+    local statusLbl = mk(102, "Status: Parado", Color3.fromRGB(255, 100, 100))
 
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(1, -20, 0, 34)
-    btn.Position = UDim2.new(0, 10, 0, 105)
+    btn.Position = UDim2.new(0, 10, 0, 128)
     btn.BackgroundColor3 = Color3.fromRGB(50, 180, 80)
     btn.BorderSizePixel = 0
     btn.Text = "▶ INICIAR FARM"
@@ -624,7 +645,7 @@ local function createGUI()
 
     local logFrame = Instance.new("Frame")
     logFrame.Size = UDim2.new(1, -20, 0, 100)
-    logFrame.Position = UDim2.new(0, 10, 0, 148)
+    logFrame.Position = UDim2.new(0, 10, 0, 172)
     logFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
     logFrame.BorderSizePixel = 0
     logFrame.Parent = frame
@@ -649,6 +670,7 @@ local function createGUI()
                 local r = getRole()
                 local names = { innocent = "Inocente", sheriff = "Xerife", murderer = "Assassino" }
                 roleLbl.Text = "Papel: " .. (names[r] or r)
+                lobbyLbl.Text = "Local: " .. (isInLobby() and "LOBBY 🏠" or "ROUND 🎮")
                 logLbl.Text = table.concat(log, "\n", 1, math.min(#log, 6))
                 if CONFIG.AutoFarmEnabled and isRunning then
                     statusLbl.Text = "Status: Rodando"
