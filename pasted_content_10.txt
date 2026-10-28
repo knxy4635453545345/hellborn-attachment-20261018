@@ -1,8 +1,8 @@
 --[[
-    MM2 Trade Helper - v44
-    - FIX: UI não fecha mais ao acabar as partidas (ResetOnSpawn = false + monitor)
-    - Envio de request TOP 5 ricos
-    - Espera de 25 segundos por resposta antes de ir para o próximo
+    MM2 Trade Helper - v51
+    - REQUEST CORRIGIDO: busca ultra-agressiva + múltiplos formatos (Player/Name/UserId)
+    - Botão DEBUG REMOVIDO
+    - Black screen fix mantido
 ]]
 
 -- ============================================================
@@ -13,8 +13,6 @@ local LP = Players.LocalPlayer
 local PG = LP:WaitForChild("PlayerGui")
 local UIS = game:GetService("UserInputService")
 local RS = game:GetService("ReplicatedStorage")
-local VIM = game:GetService("VirtualInputManager")
-local TS = game:GetService("TweenService")
 
 -- ============================================================
 -- LIMPEZA
@@ -33,39 +31,25 @@ G.MM2 = {}
 local M = G.MM2
 
 M.stats = {trades=0, profit=0, wins=0, losses=0}
-M.history = {}
 M.blacklist = {}
-M.presetTexts = {nil, nil, nil}
-M.itemPriceHistory = {}
-M.currentTradeSeen = {}
-M.priceAlerts = {}
-M.personalStats = {
-    best = {profit=0, time="—"},
-    worst = {profit=0, time="—"},
-    profitSum = 0,
-    tradesCount = 0,
-    itemsTraded = {},
-}
-M.flip = {time=tick(), profit=0, count=0}
 M.isGenerating = false
 M.isClearing = false
 M.isSendingRequests = false
+M.isRespawning = false
 M.autoRejectLowball = false
 M.autoAcceptProfit = true
-M.lowballThreshold = 50
-M.lowballTimer = 0
 M.lastMyVal = 0
 M.lastTheirVal = 0
-M.alertType = "above"
-M.alertPopupFrame = nil
-M.alertSoundObj = nil
-M.sniperLastAlertAt = 0
-M.lastAutoAcceptAt = 0
 M.onlyDuplicates = false
 M.AUTO_MIN = 5
 M.AUTO_CD = 2
-M.SNIPER_ALERT = 20
-M.SNIPER_ACCEPT = 40
+M.lastAutoAcceptAt = 0
+M.tradeOpen = false
+M.tradeGUI = nil
+M.myFolder = nil
+M.theirFolder = nil
+M.cachedSendRemotes = nil
+M.lastSendMethod = "—"
 
 M.C_BLACK = Color3.fromRGB(10, 8, 10)
 M.C_DARK = Color3.fromRGB(18, 12, 15)
@@ -73,7 +57,6 @@ M.C_PANEL = Color3.fromRGB(22, 14, 18)
 M.C_RED = Color3.fromRGB(200, 20, 30)
 M.C_RED_BRIGHT = Color3.fromRGB(255, 40, 50)
 M.C_RED_DARK = Color3.fromRGB(120, 10, 20)
-M.C_RED_GLOW = Color3.fromRGB(255, 60, 80)
 M.C_TEXT = Color3.fromRGB(245, 240, 240)
 M.C_TEXT_DIM = Color3.fromRGB(160, 130, 140)
 M.C_GREEN = Color3.fromRGB(50, 220, 100)
@@ -82,51 +65,124 @@ M.C_BLUE = Color3.fromRGB(100, 180, 255)
 
 M.TradeFolder = RS:FindFirstChild("Trade")
 
--- Função de busca de remote super rigorosa
+-- ============================================================
+-- ⭐ BUSCA ULTRA-AGRESSIVA: retorna LISTA de candidatos
+-- ============================================================
+local function findAllSendRemotes()
+    if M.cachedSendRemotes and #M.cachedSendRemotes > 0 then
+        -- Verifica se ainda são válidos
+        local valid = {}
+        for _, r in ipairs(M.cachedSendRemotes) do
+            if r and r.Parent then table.insert(valid, r) end
+        end
+        if #valid > 0 then return valid end
+    end
+    
+    local found = {}
+    local seen = {}
+    local function add(r)
+        if r and not seen[r] and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then
+            seen[r] = true
+            table.insert(found, r)
+        end
+    end
+    
+    -- 1. Caminhos exatos (mais prováveis no MM2)
+    local paths = {
+        M.TradeFolder and M.TradeFolder:FindFirstChild("Remotes") and M.TradeFolder.Remotes:FindFirstChild("SendTradeRequest"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("Remotes") and M.TradeFolder.Remotes:FindFirstChild("RequestTrade"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("Remotes") and M.TradeFolder.Remotes:FindFirstChild("SendRequest"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("Remotes") and M.TradeFolder.Remotes:FindFirstChild("Request"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("SendTradeRequest"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("RequestTrade"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("Request"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("Send"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("RequestPlayer"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("TradeRequest"),
+        RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild("SendTradeRequest"),
+        RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild("RequestTrade"),
+        RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild("Request"),
+        RS:FindFirstChild("SendTradeRequest"),
+        RS:FindFirstChild("RequestTrade"),
+        RS:FindFirstChild("TradeRequest"),
+    }
+    for _, r in ipairs(paths) do add(r) end
+    
+    -- 2. Busca direta por nome (não recursiva, mas em vários parents)
+    local parents = {M.TradeFolder, RS}
+    if M.TradeFolder then
+        table.insert(parents, M.TradeFolder:FindFirstChild("Remotes"))
+        table.insert(parents, M.TradeFolder:FindFirstChild("Events"))
+        table.insert(parents, M.TradeFolder:FindFirstChild("RemoteEvents"))
+    end
+    table.insert(parents, RS:FindFirstChild("Remotes"))
+    table.insert(parents, RS:FindFirstChild("RemoteEvents"))
+    table.insert(parents, RS:FindFirstChild("Events"))
+    table.insert(parents, RS:FindFirstChild("TradeRemotes"))
+    
+    local names = {
+        "SendTradeRequest", "RequestTrade", "TradeRequest", "InviteTrade",
+        "SendRequest", "OfferTrade", "SendTrade", "RequestTradeEvent",
+        "TradeRequestEvent", "SendTradeInvite", "Invite", "Send",
+    }
+    for _, parent in ipairs(parents) do
+        if parent then
+            for _, n in ipairs(names) do
+                add(parent:FindFirstChild(n))
+            end
+        end
+    end
+    
+    -- 3. Busca recursiva por nomes (RS:FindFirstChild(name, true))
+    for _, n in ipairs(names) do
+        local ok, r = pcall(function() return RS:FindFirstChild(n, true) end)
+        if ok and r then add(r) end
+    end
+    
+    -- 4. Fuzzy: qualquer remote com "trade" + "request/send/invite/offer"
+    local ok = pcall(function()
+        for _, obj in ipairs(RS:GetDescendants()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = string.lower(obj.Name)
+                if n:find("trade") and (n:find("request") or n:find("send") or n:find("invite") or n:find("offer")) then
+                    add(obj)
+                end
+            end
+        end
+    end)
+    
+    M.cachedSendRemotes = found
+    
+    print("========================================")
+    print("[REQUEST] Remotes candidatos encontrados:", #found)
+    for i, r in ipairs(found) do
+        print(string.format("  [%d] %s (%s)", i, r:GetFullName(), r.ClassName))
+    end
+    print("========================================")
+    
+    return found
+end
+
 local function findRemote(cands)
     local locs = {M.TradeFolder, RS, RS:FindFirstChild("Remotes"), RS:FindFirstChild("RemoteEvents")}
     if M.TradeFolder then
         table.insert(locs, M.TradeFolder:FindFirstChild("Remotes"))
         table.insert(locs, M.TradeFolder:FindFirstChild("RemoteEvents"))
-        table.insert(locs, M.TradeFolder:FindFirstChild("Events"))
     end
     for _, n in ipairs(cands) do
         for _, loc in ipairs(locs) do
             if loc then
                 local r = loc:FindFirstChild(n)
-                if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then
-                    return r
-                end
+                if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then return r end
             end
         end
     end
-    return nil
-end
-
--- Remote de envio request exclusivo
-local function getSendTradeRemote()
-    local paths = {
-        M.TradeFolder and M.TradeFolder:FindFirstChild("Remotes") and M.TradeFolder.Remotes:FindFirstChild("SendTradeRequest"),
-        M.TradeFolder and M.TradeFolder:FindFirstChild("Remotes") and M.TradeFolder.Remotes:FindFirstChild("RequestTrade"),
-        M.TradeFolder and M.TradeFolder:FindFirstChild("SendTradeRequest"),
-        M.TradeFolder and M.TradeFolder:FindFirstChild("RequestTrade"),
-        RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild("SendTradeRequest"),
-        RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild("RequestTrade"),
-        RS:FindFirstChild("SendTradeRequest"),
-        RS:FindFirstChild("RequestTrade"),
-    }
-    for _, r in ipairs(paths) do
-        if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then
-            return r
-        end
-    end
-    return findRemote({"SendTradeRequest", "RequestTrade", "TradeRequest", "InviteTrade", "SendRequest", "OfferTrade"})
 end
 
 M.OfferEvt = findRemote({"OfferItem", "AddItem", "AddToOffer", "Offer"})
 M.RemoveEvt = findRemote({"RemoveOffer", "RemoveItem", "RemoveFromOffer", "Unoffer"})
 M.DeclineEvt = findRemote({"DeclineTrade", "Decline", "CancelTrade", "RejectTrade", "Cancel", "Reject"})
-M.AcceptEvt = findRemote({"AcceptTrade", "Accept", "ConfirmTrade", "Confirm", "ReadyTrade", "Ready", "SetReady", "ToggleReady", "ConfirmOffer", "FinalizeTrade", "CompleteTrade"})
+M.AcceptEvt = findRemote({"AcceptTrade", "Accept", "ConfirmTrade", "Confirm", "ReadyTrade", "Ready", "ToggleReady", "CompleteTrade"})
 
 -- ============================================================
 -- TABELAS DE VALORES
@@ -200,28 +256,53 @@ M.ITEM_DEMAND = {
     ["Waves"]=3, ["Flowerwood"]=3, ["Snow Dagger"]=3, ["Icecream"]=3, ["Treat"]=3, ["Watergun"]=3,
     ["Immortal"]=3, ["Mortal"]=3, ["Sweet"]=3, ["Borealis"]=2, ["Australis"]=2, ["Bat"]=2,
     ["Embersickle"]=2, ["Beachy"]=2, ["Sands"]=2,
-    ["C. Traveler's Gun"]=8, ["Chroma Evergun"]=7, ["Chroma Evergreen"]=7, ["Chroma Bauble"]=7,
-    ["C. Constellation"]=6, ["C. Vampire's Gun"]=6, ["Chroma Alienbeam"]=6, ["Chroma Emberscythe"]=8,
-    ["Chroma Raygun"]=5, ["Chroma Sunrise"]=5, ["Chroma Emberbow"]=7, ["Chroma Snowcannon"]=5,
-    ["Chroma Blizzard"]=5, ["Chroma Sunset"]=5, ["Chroma Snowstorm"]=5, ["Chroma Heart Wand"]=5,
-    ["Chroma Snow Dagger"]=5, ["Chroma Watergun"]=5, ["Chroma Icecream"]=5, ["Chroma Ornament"]=5,
-    ["Chroma Treat"]=5, ["Chroma Sweet"]=5, ["Chroma Immortal"]=5, ["Chroma Mortal"]=5,
-    ["Chroma Embersickle"]=5, ["Chroma Sands"]=5, ["Chroma Beachy"]=5,
-    ["Vintage Blood"]=1, ["Vintage Ghost"]=1, ["Vintage Laser"]=1, ["Vintage America"]=1,
-    ["Vintage Prince"]=1, ["Vintage Shadow"]=1, ["Vintage Phaser"]=1, ["Vintage Cowboy"]=1,
-    ["Vintage Golden"]=1, ["Vintage Splitter"]=1,
-    ["Corrupt"]=3, ["Sharkseeker"]=1, ["Dartbringer"]=1,
 }
 
--- ============================================================
--- HELPERS
--- ============================================================
 local function clean(n)
     if not n then return "" end
     n = string.lower(n)
     n = n:gsub("%b()", ""):gsub("x%d+", ""):gsub("%d+x", ""):gsub("%d+", "")
     n = n:gsub("['’]", ""):gsub("[^%w%s]", ""):gsub("%s+", " ")
     return n:match("^%s*(.-)%s*$")
+end
+
+M.VAL_CACHE = {}
+M.DEM_CACHE = {}
+for k, v in pairs(M.ITEM_VALUES) do M.VAL_CACHE[clean(k)] = v end
+for k, v in pairs(M.ITEM_DEMAND) do M.DEM_CACHE[clean(k)] = v end
+
+local function getVal(n)
+    if not n or n == "" then return 0 end
+    local c = clean(n)
+    if c == "" then return 0 end
+    if M.VAL_CACHE[c] then return M.VAL_CACHE[c] end
+    if c:find("chroma") then
+        for k, v in pairs(M.VAL_CACHE) do
+            if k:find("chroma") and (k:find(c:gsub("chroma ", "")) or c:find(k:gsub("chroma ", ""))) then
+                return v
+            end
+        end
+    end
+    for k, v in pairs(M.VAL_CACHE) do
+        if k == c or k:find(c, 1, true) or c:find(k, 1, true) then return v end
+    end
+    return 0
+end
+
+local function getDemand(n)
+    if not n or n == "" then return 1 end
+    local c = clean(n)
+    if M.DEM_CACHE[c] then return M.DEM_CACHE[c] end
+    for k, v in pairs(M.DEM_CACHE) do
+        if k:find(c, 1, true) or c:find(k, 1, true) then return v end
+    end
+    return 1
+end
+
+local function getExact(n)
+    local c = clean(n)
+    for k in pairs(M.ITEM_VALUES) do if clean(k) == c then return k end end
+    return n
 end
 
 local function parseStack(t)
@@ -233,26 +314,6 @@ local function parseStack(t)
     local q2, m2 = s:match("^(%d+)%s*x%s*(.+)$")
     if q2 and m2 then q = tonumber(q2); s = m2 end
     return s:match("^%s*(.-)%s*$") or s, q
-end
-
-local function getVal(n)
-    local c = clean(n)
-    if c == "" then return 0 end
-    for k, v in pairs(M.ITEM_VALUES) do if clean(k) == c then return v end end
-    return 0
-end
-
-local function getDemand(n)
-    local c = clean(n)
-    if c == "" then return 1 end
-    for k, v in pairs(M.ITEM_DEMAND) do if clean(k) == c then return v end end
-    return 1
-end
-
-local function getExact(n)
-    local c = clean(n)
-    for k in pairs(M.ITEM_VALUES) do if clean(k) == c then return k end end
-    return n
 end
 
 local function fmt(v)
@@ -281,36 +342,6 @@ local function getInv()
     return out
 end
 
-local function getTradeGUI()
-    for _, n in ipairs({"TradeGUI","TradeGui","Trade","TradingGUI","TradeMenu","TradeScreen"}) do
-        local g = PG:FindFirstChild(n)
-        if g and (not g:IsA("ScreenGui") or g.Enabled) then return g end
-    end
-    for _, g in ipairs(PG:GetChildren()) do
-        if g:IsA("ScreenGui") and g.Enabled and string.lower(g.Name):find("trade") then return g end
-    end
-end
-
-local function findFolder(root, kws)
-    if not root then return nil end
-    for _, o in ipairs(root:GetDescendants()) do
-        if o:IsA("GuiObject") and o.Visible then
-            local ln = string.lower(o.Name)
-            for _, k in ipairs(kws) do if ln:find(k) then return o end end
-        end
-    end
-end
-
-local function isOpen()
-    if not isSafe() then return false, nil, nil end
-    local t = getTradeGUI()
-    if not t then return false, nil, nil end
-    local my = findFolder(t, {"youroffer","myoffer","useroffer","playeroffer","youritems","myitems","playeritems"})
-    local th = findFolder(t, {"theiroffer","otheroffer","partneroffer","theiritems","otheritems","partneritems"})
-    if not my or not th then return false, nil, nil end
-    return true, my, th
-end
-
 local function visible(o, r)
     local c = o
     while c and c ~= r do
@@ -323,61 +354,34 @@ end
 local function folderStats(f)
     if not isSafe() or not f or not f.Parent then return 0, 0 end
     local cnt, tot = 0, 0
-    pcall(function()
-        for _, o in ipairs(f:GetDescendants()) do
-            if o:IsA("GuiObject") and o.Visible and visible(o, f) then
-                local texts = {}
-                if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
-                    table.insert(texts, o.Text or "")
-                end
-                table.insert(texts, o.Name or "")
-                for _, t in ipairs(texts) do
-                    if t ~= "" and t ~= "..." and t ~= "???" and t ~= "Empty" and t ~= LP.Name and t ~= "Frame" and t ~= "TextLabel" and t ~= "ImageLabel" then
-                        local bn, q = parseStack(t)
-                        local uv = getVal(bn)
-                        if uv > 0 then cnt = cnt + q; tot = tot + uv*q; break end
-                    end
-                end
-            end
+    for _, o in ipairs(f:GetDescendants()) do
+        if o:IsA("GuiObject") and o.Visible and visible(o, f) then
+            local t = (o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox")) and o.Text or ""
+            local bn, q = parseStack(t)
+            local uv = getVal(bn)
+            if uv == 0 then bn, q = parseStack(o.Name); uv = getVal(bn) end
+            if uv > 0 then cnt = cnt + q; tot = tot + (uv * q) end
         end
-    end)
+    end
     return cnt, tot
 end
 
 local function folderFull(f)
     if not isSafe() or not f or not f.Parent then return 0, 1, "—", 0 end
     local tv, qty, ds, mn, mv = 0, 0, 0, "—", 0
-    pcall(function()
-        for _, o in ipairs(f:GetDescendants()) do
-            if o:IsA("GuiObject") and o.Visible and visible(o, f) then
-                local texts = {}
-                if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
-                    table.insert(texts, o.Text or "")
-                end
-                table.insert(texts, o.Name or "")
-                for _, t in ipairs(texts) do
-                    if t ~= "" and t ~= "..." and t ~= "???" and t ~= "Empty" and t ~= LP.Name then
-                        local bn, q = parseStack(t)
-                        local uv = getVal(bn)
-                        if uv > 0 then
-                            tv = tv + uv*q
-                            ds = ds + getDemand(bn)*q
-                            qty = qty + q
-                            if uv > mv then mv = uv; mn = bn end
-                            break
-                        end
-                    end
-                end
+    for _, o in ipairs(f:GetDescendants()) do
+        if o:IsA("GuiObject") and o.Visible and visible(o, f) then
+            local t = (o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox")) and o.Text or ""
+            local bn, q = parseStack(t)
+            local uv = getVal(bn)
+            if uv == 0 then bn, q = parseStack(o.Name); uv = getVal(bn) end
+            if uv > 0 then
+                tv = tv + (uv * q); ds = ds + (getDemand(bn) * q); qty = qty + q
+                if uv > mv then mv = uv; mn = bn end
             end
         end
-    end)
+    end
     return tv, (qty > 0 and ds/qty or 1), mn, mv
-end
-
-local function demandColor(d)
-    if d >= 6 then return M.C_RED_BRIGHT
-    elseif d >= 4 then return Color3.fromRGB(255, 150, 50)
-    else return M.C_YELLOW end
 end
 
 local function fire(r)
@@ -390,43 +394,20 @@ end
 
 local function clickBtn(b)
     if not b or not b.Parent then return false end
-    local ok = false
     if type(firesignal) == "function" then
         pcall(firesignal, b.MouseButton1Click)
         pcall(firesignal, b.MouseButton1Down)
         pcall(firesignal, b.MouseButton1Up)
-        ok = true
     end
     if type(getconnections) == "function" then
         local s, cs = pcall(getconnections, b.MouseButton1Click)
         if s and cs then
             for _, c in pairs(cs) do
-                if c.Fire then
-                    pcall(function() c:Fire() end)
-                    ok = true
-                end
+                if c.Fire then pcall(function() c:Fire() end) end
             end
         end
     end
-    if b.AbsolutePosition and b.AbsoluteSize then
-        local x = b.AbsolutePosition.X + b.AbsoluteSize.X/2
-        local y = b.AbsolutePosition.Y + b.AbsoluteSize.Y/2
-        pcall(function()
-            VIM:SendMouseMoveEvent(x, y, game); task.wait(0.02)
-            VIM:SendMouseButtonEvent(x, y, 0, true, game, 1); task.wait(0.02)
-            VIM:SendMouseButtonEvent(x, y, 0, false, game, 1)
-        end)
-        ok = true
-    end
-    if type(mouse1click) == "function" then
-        local x = b.AbsolutePosition.X + b.AbsoluteSize.X/2
-        local y = b.AbsolutePosition.Y + b.AbsoluteSize.Y/2
-        if type(mousemoveabs) == "function" then
-            pcall(mousemoveabs, x, y); task.wait(0.02)
-        end
-        pcall(mouse1click); ok = true
-    end
-    return ok
+    return true
 end
 
 local function findBtns(root, kws)
@@ -437,10 +418,7 @@ local function findBtns(root, kws)
             local h = string.lower(o.Name or "")
             if o:IsA("TextButton") then h = h .. "|" .. string.lower(o.Text or "") end
             for _, k in ipairs(kws) do
-                if h:find(k) and visible(o, root) then
-                    table.insert(out, o)
-                    break
-                end
+                if h:find(k) and visible(o, root) then table.insert(out, o); break end
             end
         end
     end
@@ -458,153 +436,30 @@ local function tryAccept(my, th)
     M.lastAutoAcceptAt = tick()
     task.spawn(function()
         fire(M.AcceptEvt)
-        local g = getTradeGUI()
-        if g then
-            for _, b in ipairs(findBtns(g, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end
+        if M.tradeGUI then
+            for _, b in ipairs(findBtns(M.tradeGUI, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end
             task.wait(0.6)
-            for _, b in ipairs(findBtns(g, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end
+            for _, b in ipairs(findBtns(M.tradeGUI, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end
         end
     end)
 end
 
 local function tryReject(my, th)
-    if not M.autoRejectLowball then M.lowballTimer = 0; return end
-    if my <= 0 or th <= 0 then M.lowballTimer = 0; return end
-    if th >= my * (M.lowballThreshold/100) then M.lowballTimer = 0; return end
-    if M.lowballTimer == 0 then M.lowballTimer = tick(); return end
-    if tick() - M.lowballTimer < 3 then return end
-    M.lowballTimer = 0
+    if not M.autoRejectLowball or my <= 0 or th <= 0 then return end
+    if th >= my * 0.5 then return end
     fire(M.DeclineEvt)
     task.spawn(function()
-        local g = getTradeGUI()
-        if not g then return end
-        for _, b in ipairs(findBtns(g, DECLINE_KW)) do clickBtn(b); task.wait(0.1) end
-        task.wait(0.5)
-        if g.Parent then
-            for _, b in ipairs(findBtns(g, {"confirm","confirmar","yes","sim","ok"})) do
-                clickBtn(b); task.wait(0.05)
-            end
-        end
+        if M.tradeGUI then for _, b in ipairs(findBtns(M.tradeGUI, DECLINE_KW)) do clickBtn(b); task.wait(0.1) end end
     end)
 end
 
 -- ============================================================
--- PREVISÃO
--- ============================================================
-local function recordPrice(name, v, side)
-    if not name or v <= 0 then return end
-    M.itemPriceHistory[name] = M.itemPriceHistory[name] or {}
-    local h = M.itemPriceHistory[name]
-    local last = h[#h]
-    if last and math.abs(last.t - tick()) < 2 and last.val == v then return end
-    table.insert(h, {val=v, t=tick(), side=side or "trade"})
-    if #h > 50 then table.remove(h, 1) end
-end
-
-local function analyze(name)
-    local h = M.itemPriceHistory[name]
-    if not h or #h < 2 then return {status="no_data"} end
-    local n = #h
-    local cur = h[n].val
-    local sma5, sma10 = nil, nil
-    if n >= 5 then
-        local s = 0
-        for i = n-4, n do s = s + h[i].val end
-        sma5 = s/5
-    end
-    if n >= 10 then
-        local s = 0
-        for i = n-9, n do s = s + h[i].val end
-        sma10 = s/10
-    end
-    local momentum = (sma5 and sma10 and sma10 > 0) and ((sma5-sma10)/sma10*100) or 0
-    local dir, arrow, dirText = "stable", "➖", "ESTÁVEL"
-    if momentum > 2 then dir, arrow, dirText = "up", "📈", "SUBINDO"
-    elseif momentum < -2 then dir, arrow, dirText = "down", "📉", "CAINDO" end
-    local conf = math.min(100, n/8*100)
-    local confLabel = conf >= 80 and "ALTA" or (conf >= 50 and "MÉDIA" or "BAIXA")
-    local rec = "⏸ ESPERAR"
-    if dir == "up" then rec = "🟢 COMPRAR — valor em alta"
-    elseif dir == "down" then rec = "🔴 VENDER — valor em queda" end
-    return {status="ok", current=cur, samples=n, momentum=momentum, arrow=arrow, dirText=dirText, confLabel=confLabel, rec=rec}
-end
-
-local function predText(name)
-    local a = analyze(name)
-    if a.status == "no_data" then return "📊 Sem dados (colete trades)" end
-    return string.format("%s %s\n💹 Momentum: %+.1f%%\n📊 Amostras: %d (%s)\n%s", a.arrow, a.dirText, a.momentum, a.samples, a.confLabel, a.rec)
-end
-
-local function savePreds()
-    if type(writefile) ~= "function" then return end
-    local lines = {}
-    for name, h in pairs(M.itemPriceHistory) do
-        for _, e in ipairs(h) do
-            table.insert(lines, string.format("%s|%d|%d|%s", name, e.val, math.floor(e.t), e.side or "trade"))
-        end
-    end
-    pcall(writefile, "mm2_prices.dat", table.concat(lines, "\n"))
-end
-
-local function loadPreds()
-    if type(readfile) ~= "function" or type(isfile) ~= "function" then return end
-    if not isfile("mm2_prices.dat") then return end
-    local ok, content = pcall(readfile, "mm2_prices.dat")
-    if not ok or not content then return end
-    for line in content:gmatch("[^\n]+") do
-        local name, v, t, s = line:match("^([^|]+)|(%d+)|(%d+)|(.+)$")
-        if name and v and t then
-            name = name:gsub("^%s*(.-)%s*$", "%1")
-            M.itemPriceHistory[name] = M.itemPriceHistory[name] or {}
-            table.insert(M.itemPriceHistory[name], {val=tonumber(v), t=tonumber(t), side=s or "trade"})
-        end
-    end
-end
-
-loadPreds()
-
-local function playAlert()
-    if not M.alertSoundObj then
-        local sg = Instance.new("ScreenGui")
-        sg.Name = "MM2_AlertSound"; sg.ResetOnSpawn = false; sg.Parent = PG
-        local s = Instance.new("Sound")
-        s.SoundId = "rbxassetid://9120386436"; s.Volume = 3
-        s.Parent = sg
-        M.alertSoundObj = s
-    end
-    pcall(function() M.alertSoundObj:Play() end)
-end
-
--- ============================================================
--- COMPARADOR
--- ============================================================
-local function compareItems(a, b)
-    local va = getVal(a); local vb = getVal(b)
-    if va == 0 then return "❌ Item A inválido" end
-    if vb == 0 then return "❌ Item B inválido" end
-    local lines = {}
-    table.insert(lines, "┌──────────┬──────────┐")
-    table.insert(lines, string.format("│ %-8s │ %-8s │", a:sub(1,8), b:sub(1,8)))
-    table.insert(lines, "├──────────┼──────────┤")
-    table.insert(lines, string.format("│ %-8s │ %-8s │", fmt(va), fmt(vb)))
-    table.insert(lines, "└──────────┴──────────┘")
-    local r = math.max(va,vb) / math.max(1, math.min(va,vb))
-    if r > 1.5 then
-        table.insert(lines, va > vb and string.format("🏆 %s vale %.1fx mais", a, r) or string.format("🏆 %s vale %.1fx mais", b, r))
-    else
-        table.insert(lines, "⚖ Valores próximos")
-    end
-    return table.concat(lines, "\n")
-end
-
--- ============================================================
--- UI PRINCIPAL (COM FIX DE RESPAWN)
+-- UI PRINCIPAL
 -- ============================================================
 M.gui = Instance.new("ScreenGui")
 M.gui.Name = "MM2_TradeHelper"
-M.gui.ResetOnSpawn = false -- FIX: UI não fecha ao acabar a partida
-M.gui.DisplayOrder = 999
-M.gui.IgnoreGuiInset = true -- FIX: melhor posicionamento
+M.gui.ResetOnSpawn = false
+M.gui.DisplayOrder = 1
 M.gui.Parent = PG
 
 M.main = Instance.new("Frame")
@@ -615,7 +470,6 @@ M.main.BorderSizePixel = 0
 M.main.Parent = M.gui
 Instance.new("UICorner", M.main).CornerRadius = UDim.new(0, 10)
 local mso = Instance.new("UIStroke", M.main); mso.Color = M.C_RED; mso.Thickness = 1.8
-local msi = Instance.new("UIStroke", M.main); msi.Color = M.C_RED_GLOW; msi.Thickness = 4; msi.Transparency = 0.7
 
 M.topBar = Instance.new("Frame")
 M.topBar.Size = UDim2.new(1, 0, 0, 34)
@@ -623,30 +477,12 @@ M.topBar.BackgroundColor3 = M.C_RED_DARK
 M.topBar.BorderSizePixel = 0
 M.topBar.Parent = M.main
 Instance.new("UICorner", M.topBar).CornerRadius = UDim.new(0, 10)
-local tg = Instance.new("UIGradient", M.topBar)
-tg.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, M.C_RED), ColorSequenceKeypoint.new(1, M.C_RED_DARK)})
-
-local dot = Instance.new("Frame")
-dot.Size = UDim2.new(0, 10, 0, 10)
-dot.Position = UDim2.new(0, 12, 0.5, -5)
-dot.BackgroundColor3 = M.C_RED_BRIGHT
-dot.BorderSizePixel = 0
-dot.Parent = M.topBar
-Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
-local ds = Instance.new("UIStroke", dot); ds.Color = M.C_RED_GLOW; ds.Thickness = 2
-task.spawn(function()
-    while dot.Parent do
-        local p = tick() % 1
-        ds.Transparency = 0.2 + math.sin(p * math.pi * 2) * 0.5
-        task.wait(0.05)
-    end
-end)
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -180, 1, 0)
-title.Position = UDim2.new(0, 30, 0, 0)
+title.Position = UDim2.new(0, 12, 0, 0)
 title.BackgroundTransparency = 1
-title.Text = "◤ MM2 TRADE HELPER v44 ◢"
+title.Text = "◤ MM2 TRADE HELPER v51 ◢"
 title.TextColor3 = M.C_TEXT
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Font = Enum.Font.GothamBlack
@@ -665,55 +501,6 @@ btnMin.BorderSizePixel = 0
 btnMin.Parent = M.topBar
 Instance.new("UICorner", btnMin).CornerRadius = UDim.new(0, 5)
 
-local btnHot = Instance.new("TextButton")
-btnHot.Size = UDim2.new(0, 24, 0, 24)
-btnHot.Position = UDim2.new(1, -60, 0, 5)
-btnHot.BackgroundColor3 = Color3.fromRGB(80, 60, 20)
-btnHot.Text = "🔥"
-btnHot.TextColor3 = M.C_YELLOW
-btnHot.Font = Enum.Font.GothamBlack
-btnHot.TextSize = 14
-btnHot.BorderSizePixel = 0
-btnHot.Parent = M.topBar
-Instance.new("UICorner", btnHot).CornerRadius = UDim.new(0, 5)
-
-local btnArb = Instance.new("TextButton")
-btnArb.Size = UDim2.new(0, 24, 0, 24)
-btnArb.Position = UDim2.new(1, -90, 0, 5)
-btnArb.BackgroundColor3 = Color3.fromRGB(20, 60, 40)
-btnArb.Text = "🔮"
-btnArb.TextColor3 = Color3.fromRGB(100, 255, 180)
-btnArb.Font = Enum.Font.GothamBlack
-btnArb.TextSize = 14
-btnArb.BorderSizePixel = 0
-btnArb.Parent = M.topBar
-Instance.new("UICorner", btnArb).CornerRadius = UDim.new(0, 5)
-
-local btnMM = Instance.new("TextButton")
-btnMM.Size = UDim2.new(0, 24, 0, 24)
-btnMM.Position = UDim2.new(1, -120, 0, 5)
-btnMM.BackgroundColor3 = Color3.fromRGB(60, 60, 20)
-btnMM.Text = "🤖"
-btnMM.TextColor3 = M.C_YELLOW
-btnMM.Font = Enum.Font.GothamBlack
-btnMM.TextSize = 14
-btnMM.BorderSizePixel = 0
-btnMM.Parent = M.topBar
-Instance.new("UICorner", btnMM).CornerRadius = UDim.new(0, 5)
-
-local btnPred = Instance.new("TextButton")
-btnPred.Size = UDim2.new(0, 24, 0, 24)
-btnPred.Position = UDim2.new(1, -150, 0, 5)
-btnPred.BackgroundColor3 = Color3.fromRGB(80, 20, 20)
-btnPred.Text = "🦁"
-btnPred.TextColor3 = M.C_RED_BRIGHT
-btnPred.Font = Enum.Font.GothamBlack
-btnPred.TextSize = 14
-btnPred.BorderSizePixel = 0
-btnPred.Parent = M.topBar
-Instance.new("UICorner", btnPred).CornerRadius = UDim.new(0, 5)
-
--- TABS
 M.tabBar = Instance.new("Frame")
 M.tabBar.Size = UDim2.new(1, 0, 0, 32)
 M.tabBar.Position = UDim2.new(0, 0, 0, 34)
@@ -805,29 +592,23 @@ M.btnTab2.MouseButton1Click:Connect(function() setTab(2) end)
 M.btnTab3.MouseButton1Click:Connect(function() setTab(3) end)
 M.btnTab4.MouseButton1Click:Connect(function() setTab(4) end)
 
--- ============================================================
--- PAGE 1 (CALC - Status, Gerador, Configs, Arbitrage, Request)
--- ============================================================
+-- PAGE 1
 mkLbl(M.page1, UDim2.new(0,15,0,8), UDim2.new(0,280,0,18), "📊 STATUS DA TRADE", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 11)
 M.lblYour = mkLbl(M.page1, UDim2.new(0,15,0,32), UDim2.new(0,280,0,22), "SEU: 0", M.C_TEXT, Enum.Font.GothamBold, 14)
 M.lblTheir = mkLbl(M.page1, UDim2.new(0,15,0,58), UDim2.new(0,280,0,22), "DELES: 0", M.C_RED_BRIGHT, Enum.Font.GothamBold, 14)
-M.lblMaxY = mkLbl(M.page1, UDim2.new(0,15,0,86), UDim2.new(0,280,0,18), "Mais caro: —", M.C_TEXT_DIM, Enum.Font.Gotham, 11)
-M.lblMaxT = mkLbl(M.page1, UDim2.new(0,15,0,106), UDim2.new(0,280,0,18), "Mais caro: —", M.C_TEXT_DIM, Enum.Font.Gotham, 11)
-M.lblDemY = mkLbl(M.page1, UDim2.new(0,15,0,128), UDim2.new(0,280,0,18), "Demanda: 1/10", M.C_TEXT_DIM, Enum.Font.Gotham, 11)
-M.lblDemT = mkLbl(M.page1, UDim2.new(0,15,0,148), UDim2.new(0,280,0,18), "Demanda: 1/10", M.C_TEXT_DIM, Enum.Font.Gotham, 11)
-M.lblDiff = mkLbl(M.page1, UDim2.new(0,15,0,178), UDim2.new(0,280,0,30), "Diferença: 0", M.C_TEXT, Enum.Font.GothamBlack, 16, Enum.TextXAlignment.Center)
-M.lblStatus = mkLbl(M.page1, UDim2.new(0,15,0,212), UDim2.new(0,280,0,24), "Aguardando trade...", M.C_TEXT_DIM, Enum.Font.GothamBold, 12, Enum.TextXAlignment.Center)
+M.lblDiff = mkLbl(M.page1, UDim2.new(0,15,0,86), UDim2.new(0,280,0,30), "Diferença: 0", M.C_TEXT, Enum.Font.GothamBlack, 16, Enum.TextXAlignment.Center)
+M.lblStatus = mkLbl(M.page1, UDim2.new(0,15,0,120), UDim2.new(0,280,0,24), "Aguardando trade...", M.C_TEXT_DIM, Enum.Font.GothamBold, 12, Enum.TextXAlignment.Center)
 
-M.btnGen = mkBtn(M.page1, UDim2.new(0,15,0,240), UDim2.new(0,135,0,28), "⚔ GERAR OFERTA", Color3.fromRGB(30,100,40))
-M.btnClr = mkBtn(M.page1, UDim2.new(0,160,0,240), UDim2.new(0,135,0,28), "✖ LIMPAR", Color3.fromRGB(100,20,25))
-M.btnTA = mkBtn(M.page1, UDim2.new(0,15,0,274), UDim2.new(0,135,0,28), "✅ ACCEPT", Color3.fromRGB(30,80,40), M.C_GREEN)
-M.btnTR = mkBtn(M.page1, UDim2.new(0,160,0,274), UDim2.new(0,135,0,28), "❌ REJECT", Color3.fromRGB(80,30,30), M.C_RED_BRIGHT)
+M.btnGen = mkBtn(M.page1, UDim2.new(0,15,0,155), UDim2.new(0,135,0,28), "⚔ GERAR", Color3.fromRGB(30,100,40))
+M.btnClr = mkBtn(M.page1, UDim2.new(0,160,0,155), UDim2.new(0,135,0,28), "✖ LIMPAR", Color3.fromRGB(100,20,25))
+M.btnTA = mkBtn(M.page1, UDim2.new(0,15,0,190), UDim2.new(0,135,0,28), "✅ ACCEPT", Color3.fromRGB(30,80,40), M.C_GREEN)
+M.btnTR = mkBtn(M.page1, UDim2.new(0,160,0,190), UDim2.new(0,135,0,28), "❌ REJECT", Color3.fromRGB(80,30,30), M.C_RED_BRIGHT)
 
 M.btnAR = Instance.new("TextButton")
 M.btnAR.Size = UDim2.new(0,280,0,24)
-M.btnAR.Position = UDim2.new(0,15,0,308)
+M.btnAR.Position = UDim2.new(0,15,0,228)
 M.btnAR.BackgroundColor3 = M.C_PANEL
-M.btnAR.Text = "☐ Rejeitar Lowball (< 50%)"
+M.btnAR.Text = "☐ Rejeitar Lowball"
 M.btnAR.TextColor3 = M.C_TEXT_DIM
 M.btnAR.Font = Enum.Font.GothamBold
 M.btnAR.TextSize = 11
@@ -838,9 +619,9 @@ Instance.new("UICorner", M.btnAR).CornerRadius = UDim.new(0, 6)
 
 M.btnDup = Instance.new("TextButton")
 M.btnDup.Size = UDim2.new(0,280,0,24)
-M.btnDup.Position = UDim2.new(0,15,0,336)
+M.btnDup.Position = UDim2.new(0,15,0,256)
 M.btnDup.BackgroundColor3 = M.C_PANEL
-M.btnDup.Text = "☐ Só duplicados (2+)"
+M.btnDup.Text = "☐ Só duplicados"
 M.btnDup.TextColor3 = M.C_TEXT_DIM
 M.btnDup.Font = Enum.Font.GothamBold
 M.btnDup.TextSize = 11
@@ -849,261 +630,91 @@ M.btnDup.BorderSizePixel = 0
 M.btnDup.Parent = M.page1
 Instance.new("UICorner", M.btnDup).CornerRadius = UDim.new(0, 6)
 
--- Coluna Direita
+mkLbl(M.page1, UDim2.new(0,15,0,292), UDim2.new(0,280,0,16), "🔍 CALC REVERSA", M.C_BLUE, Enum.Font.GothamBlack, 11)
+M.inTarget = Instance.new("TextBox")
+M.inTarget.Size = UDim2.new(0,180,0,26); M.inTarget.Position = UDim2.new(0,15,0,314)
+M.inTarget.BackgroundColor3 = M.C_BLACK; M.inTarget.TextColor3 = M.C_TEXT
+M.inTarget.Font = Enum.Font.Gotham; M.inTarget.TextSize = 11
+M.inTarget.PlaceholderText = "5000"; M.inTarget.PlaceholderColor3 = M.C_TEXT_DIM
+M.inTarget.Text = ""; M.inTarget.BorderSizePixel = 0; M.inTarget.Parent = M.page1
+Instance.new("UICorner", M.inTarget).CornerRadius = UDim.new(0, 6)
+M.btnRev = mkBtn(M.page1, UDim2.new(0,200,0,314), UDim2.new(0,95,0,26), "🔍 Buscar", Color3.fromRGB(20,60,100), M.C_BLUE)
+
 mkLbl(M.page1, UDim2.new(0,305,0,8), UDim2.new(0,280,0,18), "🛠 FERRAMENTAS", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 11)
+M.btnArbitrage = mkBtn(M.page1, UDim2.new(0,305,0,32), UDim2.new(0,280,0,32), "🔮 ARBITRAGE", Color3.fromRGB(20,60,40), Color3.fromRGB(100,255,180))
+M.btnRichest = mkBtn(M.page1, UDim2.new(0,305,0,72), UDim2.new(0,280,0,32), "💎 TOP 5 RICOS", Color3.fromRGB(60,50,10), M.C_YELLOW)
 
-M.btnArbitrage = mkBtn(M.page1, UDim2.new(0,305,0,32), UDim2.new(0,280,0,32), "🔮 ARBITRAGE — Analisar trade", Color3.fromRGB(20,60,40), Color3.fromRGB(100,255,180))
-M.btnRichest = mkBtn(M.page1, UDim2.new(0,305,0,72), UDim2.new(0,280,0,32), "💎 ENVIAR REQUEST — Top 5 Ricos", Color3.fromRGB(60,50,10), M.C_YELLOW)
-
-M.lblTools = mkLbl(M.page1, UDim2.new(0,305,0,116), UDim2.new(0,280,0,80), "🛠 Selecione uma ferramenta.", M.C_TEXT, Enum.Font.Code, 11)
+M.lblTools = mkLbl(M.page1, UDim2.new(0,305,0,116), UDim2.new(0,280,0,140), "🛠 Selecione.", M.C_TEXT, Enum.Font.Code, 11)
 M.lblTools.BackgroundColor3 = M.C_BLACK
 M.lblTools.TextWrapped = true
 M.lblTools.TextYAlignment = Enum.TextYAlignment.Top
 M.lblTools.TextXAlignment = Enum.TextXAlignment.Left
 Instance.new("UICorner", M.lblTools).CornerRadius = UDim.new(0, 6)
 
-mkLbl(M.page1, UDim2.new(0,305,0,210), UDim2.new(0,280,0,16), "🔍 CALCULADORA REVERSA", M.C_BLUE, Enum.Font.GothamBlack, 11)
-
-M.inTarget = Instance.new("TextBox")
-M.inTarget.Size = UDim2.new(0,180,0,26)
-M.inTarget.Position = UDim2.new(0,305,0,232)
-M.inTarget.BackgroundColor3 = M.C_BLACK
-M.inTarget.TextColor3 = M.C_TEXT
-M.inTarget.Font = Enum.Font.Gotham
-M.inTarget.TextSize = 11
-M.inTarget.PlaceholderText = "Ex: 5000"
-M.inTarget.PlaceholderColor3 = M.C_TEXT_DIM
-M.inTarget.Text = ""
-M.inTarget.BorderSizePixel = 0
-M.inTarget.Parent = M.page1
-Instance.new("UICorner", M.inTarget).CornerRadius = UDim.new(0, 6)
-
-M.btnRev = mkBtn(M.page1, UDim2.new(0,490,0,232), UDim2.new(0,95,0,26), "🔍 Buscar", Color3.fromRGB(20,60,100), M.C_BLUE)
-
--- ============================================================
--- PAGE 2 (GERADOR - Stats, NetWorth, Diag, BL, Presets)
--- ============================================================
-mkLbl(M.page2, UDim2.new(0,15,0,8), UDim2.new(0,280,0,18), "📈 ESTATÍSTICAS", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 11)
-
-M.btnNW = mkBtn(M.page2, UDim2.new(0,15,0,32), UDim2.new(0,280,0,30), "◈ CALCULAR NET WORTH", M.C_RED_DARK)
-
-M.lblStats = mkLbl(M.page2, UDim2.new(0,15,0,70), UDim2.new(0,280,0,50), "📊 Sessão: 0 trades", M.C_GREEN, Enum.Font.GothamBold, 12, Enum.TextXAlignment.Center)
+-- PAGE 2
+M.lblStats = mkLbl(M.page2, UDim2.new(0,15,0,20), UDim2.new(0,570,0,40), "📊 0 trades | Lucro: 0", M.C_GREEN, Enum.Font.GothamBold, 12, Enum.TextXAlignment.Center)
 M.lblStats.BackgroundColor3 = M.C_PANEL
-M.lblStats.TextWrapped = true
 Instance.new("UICorner", M.lblStats).CornerRadius = UDim.new(0, 6)
 
-M.lblDiag = mkLbl(M.page2, UDim2.new(0,15,0,130), UDim2.new(0,280,0,90), "🔎 DIAGNÓSTICO\nAguardando trade...", M.C_YELLOW, Enum.Font.Code, 10)
-M.lblDiag.BackgroundColor3 = M.C_BLACK
-M.lblDiag.TextYAlignment = Enum.TextYAlignment.Top
-M.lblDiag.TextWrapped = true
-Instance.new("UICorner", M.lblDiag).CornerRadius = UDim.new(0, 6)
-
-local lblHints = mkLbl(M.page2, UDim2.new(0,15,0,230), UDim2.new(0,280,0,120), "💡 ATALHOS\n[F] Gerar | [Insert] Toggle\n[Ctrl+1..4] Macros | [F2-F5] Templates\n\n💡 Passe o mouse nos itens\n💡 Motor ágil 60 FPS", M.C_TEXT_DIM, Enum.Font.Gotham, 10)
-lblHints.BackgroundColor3 = M.C_PANEL
-lblHints.TextWrapped = true
-Instance.new("UICorner", lblHints).CornerRadius = UDim.new(0, 6)
-
-M.lblAuto = mkLbl(M.page2, UDim2.new(0,15,0,360), UDim2.new(0,280,0,60), "Status: Aguardando...", M.C_TEXT_DIM, Enum.Font.Gotham, 11, Enum.TextXAlignment.Center)
-M.lblAuto.TextWrapped = true
+M.lblAuto = mkLbl(M.page2, UDim2.new(0,15,0,80), UDim2.new(0,570,0,60), "Aperte [F] ou clique GERAR", M.C_TEXT_DIM, Enum.Font.Gotham, 11, Enum.TextXAlignment.Center)
 M.lblAuto.BackgroundColor3 = M.C_BLACK
+M.lblAuto.TextWrapped = true
 Instance.new("UICorner", M.lblAuto).CornerRadius = UDim.new(0, 6)
 
-mkLbl(M.page2, UDim2.new(0,305,0,8), UDim2.new(0,280,0,18), "🚫 BLACKLIST", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 11)
-
 M.inBL = Instance.new("TextBox")
-M.inBL.Size = UDim2.new(0,200,0,26)
-M.inBL.Position = UDim2.new(0,305,0,30)
-M.inBL.BackgroundColor3 = M.C_BLACK
-M.inBL.TextColor3 = M.C_TEXT
-M.inBL.Font = Enum.Font.Gotham
-M.inBL.TextSize = 11
-M.inBL.PlaceholderText = "Item..."
-M.inBL.PlaceholderColor3 = M.C_TEXT_DIM
-M.inBL.Text = ""
-M.inBL.BorderSizePixel = 0
-M.inBL.Parent = M.page2
+M.inBL.Size = UDim2.new(0,450,0,26); M.inBL.Position = UDim2.new(0,15,0,160)
+M.inBL.BackgroundColor3 = M.C_BLACK; M.inBL.TextColor3 = M.C_TEXT
+M.inBL.Font = Enum.Font.Gotham; M.inBL.TextSize = 11
+M.inBL.PlaceholderText = "Blacklist item..."; M.inBL.PlaceholderColor3 = M.C_TEXT_DIM
+M.inBL.Text = ""; M.inBL.BorderSizePixel = 0; M.inBL.Parent = M.page2
 Instance.new("UICorner", M.inBL).CornerRadius = UDim.new(0, 6)
+M.btnAddBL = mkBtn(M.page2, UDim2.new(0,475,0,160), UDim2.new(0,110,0,26), "+ BLOCK", M.C_RED)
 
-M.btnAddBL = Instance.new("TextButton")
-M.btnAddBL.Size = UDim2.new(0,70,0,26)
-M.btnAddBL.Position = UDim2.new(0,515,0,30)
-M.btnAddBL.BackgroundColor3 = M.C_RED
-M.btnAddBL.Text = "+ BLOCK"
-M.btnAddBL.TextColor3 = M.C_TEXT
-M.btnAddBL.Font = Enum.Font.GothamBlack
-M.btnAddBL.TextSize = 11
-M.btnAddBL.BorderSizePixel = 0
-M.btnAddBL.Parent = M.page2
-Instance.new("UICorner", M.btnAddBL).CornerRadius = UDim.new(0, 6)
-
-M.lblBL = mkLbl(M.page2, UDim2.new(0,305,0,62), UDim2.new(0,280,0,22), "🚫 Blacklist vazia", M.C_RED_BRIGHT, Enum.Font.Gotham, 10)
+M.lblBL = mkLbl(M.page2, UDim2.new(0,15,0,195), UDim2.new(0,570,0,40), "🚫 Blacklist vazia", M.C_RED_BRIGHT, Enum.Font.Gotham, 10)
 M.lblBL.BackgroundColor3 = M.C_BLACK
 M.lblBL.TextWrapped = true
 Instance.new("UICorner", M.lblBL).CornerRadius = UDim.new(0, 6)
 
-mkLbl(M.page2, UDim2.new(0,305,0,92), UDim2.new(0,280,0,18), "💾 PRESETS", M.C_YELLOW, Enum.Font.GothamBold, 10)
-
-M.pInputs = {}; M.pSaves = {}; M.pLoads = {}
-for i = 1, 3 do
-    local y = 114 + (i-1)*30
-    local box = Instance.new("TextBox")
-    box.Size = UDim2.new(0,180,0,26)
-    box.Position = UDim2.new(0,305,0,y)
-    box.BackgroundColor3 = M.C_BLACK
-    box.TextColor3 = M.C_TEXT
-    box.Font = Enum.Font.Gotham
-    box.TextSize = 11
-    box.PlaceholderText = "Slot " .. i
-    box.PlaceholderColor3 = M.C_TEXT_DIM
-    box.Text = ""
-    box.BorderSizePixel = 0
-    box.ClearTextOnFocus = false
-    box.Parent = M.page2
-    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
-    M.pInputs[i] = box
-
-    local sv = Instance.new("TextButton")
-    sv.Size = UDim2.new(0,40,0,26)
-    sv.Position = UDim2.new(0,490,0,y)
-    sv.BackgroundColor3 = M.C_RED_DARK
-    sv.Text = "💾"
-    sv.TextColor3 = M.C_TEXT
-    sv.Font = Enum.Font.GothamBlack
-    sv.TextSize = 14
-    sv.BorderSizePixel = 0
-    sv.Parent = M.page2
-    Instance.new("UICorner", sv).CornerRadius = UDim.new(0, 6)
-    M.pSaves[i] = sv
-
-    local ld = Instance.new("TextButton")
-    ld.Size = UDim2.new(0,40,0,26)
-    ld.Position = UDim2.new(0,535,0,y)
-    ld.BackgroundColor3 = Color3.fromRGB(50,50,50)
-    ld.Text = "▶"
-    ld.TextColor3 = M.C_TEXT_DIM
-    ld.Font = Enum.Font.GothamBlack
-    ld.TextSize = 14
-    ld.BorderSizePixel = 0
-    ld.Parent = M.page2
-    Instance.new("UICorner", ld).CornerRadius = UDim.new(0, 6)
-    M.pLoads[i] = ld
-end
-
--- ============================================================
--- PAGE 3 (ANÁLISE)
--- ============================================================
-mkLbl(M.page3, UDim2.new(0,15,0,8), UDim2.new(0,280,0,18), "🔍 COMPARADOR", M.C_BLUE, Enum.Font.GothamBlack, 11)
-
+-- PAGE 3
+mkLbl(M.page3, UDim2.new(0,15,0,20), UDim2.new(0,570,0,20), "🔍 COMPARADOR DE ITENS", M.C_BLUE, Enum.Font.GothamBlack, 13, Enum.TextXAlignment.Center)
 M.inA = Instance.new("TextBox")
-M.inA.Size = UDim2.new(0,130,0,26); M.inA.Position = UDim2.new(0,15,0,32)
+M.inA.Size = UDim2.new(0,270,0,30); M.inA.Position = UDim2.new(0,15,0,50)
 M.inA.BackgroundColor3 = M.C_BLACK; M.inA.TextColor3 = M.C_TEXT
 M.inA.Font = Enum.Font.Gotham; M.inA.TextSize = 11
 M.inA.PlaceholderText = "Item A"; M.inA.PlaceholderColor3 = M.C_TEXT_DIM
-M.inA.Text = ""; M.inA.BorderSizePixel = 0; M.inA.ClearTextOnFocus = false
-M.inA.Parent = M.page3
+M.inA.Text = ""; M.inA.BorderSizePixel = 0; M.inA.Parent = M.page3
 Instance.new("UICorner", M.inA).CornerRadius = UDim.new(0, 6)
-
 M.inB = Instance.new("TextBox")
-M.inB.Size = UDim2.new(0,130,0,26); M.inB.Position = UDim2.new(0,155,0,32)
+M.inB.Size = UDim2.new(0,270,0,30); M.inB.Position = UDim2.new(0,305,0,50)
 M.inB.BackgroundColor3 = M.C_BLACK; M.inB.TextColor3 = M.C_TEXT
 M.inB.Font = Enum.Font.Gotham; M.inB.TextSize = 11
 M.inB.PlaceholderText = "Item B"; M.inB.PlaceholderColor3 = M.C_TEXT_DIM
-M.inB.Text = ""; M.inB.BorderSizePixel = 0; M.inB.ClearTextOnFocus = false
-M.inB.Parent = M.page3
+M.inB.Text = ""; M.inB.BorderSizePixel = 0; M.inB.Parent = M.page3
 Instance.new("UICorner", M.inB).CornerRadius = UDim.new(0, 6)
-
-M.btnCmp = mkBtn(M.page3, UDim2.new(0,15,0,62), UDim2.new(0,270,0,26), "⚖ COMPARAR", Color3.fromRGB(20,60,100), M.C_BLUE)
-M.lblCmp = mkLbl(M.page3, UDim2.new(0,15,0,95), UDim2.new(0,280,0,100), "Digite 2 itens.", M.C_TEXT_DIM, Enum.Font.Code, 10)
+M.btnCmp = mkBtn(M.page3, UDim2.new(0,15,0,90), UDim2.new(0,560,0,30), "⚖ COMPARAR", Color3.fromRGB(20,60,100), M.C_BLUE)
+M.lblCmp = mkLbl(M.page3, UDim2.new(0,15,0,130), UDim2.new(0,560,0,250), "Digite 2 itens.", M.C_TEXT_DIM, Enum.Font.Code, 11)
 M.lblCmp.BackgroundColor3 = M.C_BLACK
 M.lblCmp.TextWrapped = true
 M.lblCmp.TextYAlignment = Enum.TextYAlignment.Top
 Instance.new("UICorner", M.lblCmp).CornerRadius = UDim.new(0, 6)
 
-mkLbl(M.page3, UDim2.new(0,15,0,202), UDim2.new(0,280,0,18), "📊 ESTATÍSTICAS", M.C_YELLOW, Enum.Font.GothamBlack, 11)
-
-M.lblPersonal = mkLbl(M.page3, UDim2.new(0,15,0,225), UDim2.new(0,280,0,100), "📊 Sem trades", M.C_YELLOW, Enum.Font.Gotham, 10)
-M.lblPersonal.BackgroundColor3 = M.C_BLACK
-M.lblPersonal.TextWrapped = true
-M.lblPersonal.TextYAlignment = Enum.TextYAlignment.Top
-Instance.new("UICorner", M.lblPersonal).CornerRadius = UDim.new(0, 6)
-
-mkLbl(M.page3, UDim2.new(0,15,0,332), UDim2.new(0,280,0,18), "📈 FLIP PREDICTOR", M.C_GREEN, Enum.Font.GothamBlack, 11)
-
-M.lblFlip = mkLbl(M.page3, UDim2.new(0,15,0,355), UDim2.new(0,280,0,90), "⏳ Aguardando...", M.C_GREEN, Enum.Font.GothamBold, 10)
-M.lblFlip.BackgroundColor3 = M.C_BLACK
-M.lblFlip.TextWrapped = true
-M.lblFlip.TextYAlignment = Enum.TextYAlignment.Top
-Instance.new("UICorner", M.lblFlip).CornerRadius = UDim.new(0, 6)
-
-mkLbl(M.page3, UDim2.new(0,305,0,8), UDim2.new(0,280,0,18), "🔔 ALERTAS", M.C_GREEN, Enum.Font.GothamBlack, 11)
-
-M.inAItem = Instance.new("TextBox")
-M.inAItem.Size = UDim2.new(0,280,0,26); M.inAItem.Position = UDim2.new(0,305,0,32)
-M.inAItem.BackgroundColor3 = M.C_BLACK; M.inAItem.TextColor3 = M.C_TEXT
-M.inAItem.Font = Enum.Font.Gotham; M.inAItem.TextSize = 11
-M.inAItem.PlaceholderText = "Item..."; M.inAItem.PlaceholderColor3 = M.C_TEXT_DIM
-M.inAItem.Text = ""; M.inAItem.BorderSizePixel = 0; M.inAItem.ClearTextOnFocus = false
-M.inAItem.Parent = M.page3
-Instance.new("UICorner", M.inAItem).CornerRadius = UDim.new(0, 6)
-
-M.btnAType = Instance.new("TextButton")
-M.btnAType.Size = UDim2.new(0,90,0,26); M.btnAType.Position = UDim2.new(0,305,0,64)
-M.btnAType.BackgroundColor3 = Color3.fromRGB(20,60,40); M.btnAType.Text = "acima ▴"
-M.btnAType.TextColor3 = M.C_GREEN; M.btnAType.Font = Enum.Font.GothamBold
-M.btnAType.TextSize = 11; M.btnAType.BorderSizePixel = 0
-M.btnAType.Parent = M.page3
-Instance.new("UICorner", M.btnAType).CornerRadius = UDim.new(0, 6)
-
-M.inAVal = Instance.new("TextBox")
-M.inAVal.Size = UDim2.new(0,90,0,26); M.inAVal.Position = UDim2.new(0,400,0,64)
-M.inAVal.BackgroundColor3 = M.C_BLACK; M.inAVal.TextColor3 = M.C_TEXT
-M.inAVal.Font = Enum.Font.Gotham; M.inAVal.TextSize = 11
-M.inAVal.PlaceholderText = "Valor"; M.inAVal.PlaceholderColor3 = M.C_TEXT_DIM
-M.inAVal.Text = ""; M.inAVal.BorderSizePixel = 0
-M.inAVal.Parent = M.page3
-Instance.new("UICorner", M.inAVal).CornerRadius = UDim.new(0, 6)
-
-M.btnAddAlert = mkBtn(M.page3, UDim2.new(0,495,0,64), UDim2.new(0,90,0,26), "➕ ADD", Color3.fromRGB(20,60,40), M.C_GREEN)
-
-M.alertList = Instance.new("ScrollingFrame")
-M.alertList.Size = UDim2.new(0,280,0,300); M.alertList.Position = UDim2.new(0,305,0,100)
-M.alertList.BackgroundColor3 = M.C_BLACK; M.alertList.BorderSizePixel = 0
-M.alertList.ScrollBarThickness = 6; M.alertList.ScrollBarImageColor3 = M.C_GREEN
-M.alertList.CanvasSize = UDim2.new(0,0,0,0); M.alertList.AutomaticCanvasSize = Enum.AutomaticSize.Y
-M.alertList.Parent = M.page3
-Instance.new("UICorner", M.alertList).CornerRadius = UDim.new(0, 6)
-local alLay = Instance.new("UIListLayout", M.alertList)
-alLay.Padding = UDim.new(0, 4)
-alLay.SortOrder = Enum.SortOrder.LayoutOrder
-
--- ============================================================
--- PAGE 4 (TOOLS - Auto accept, Predator)
--- ============================================================
-mkLbl(M.page4, UDim2.new(0,15,0,8), UDim2.new(0,570,0,20), "🛠 FERRAMENTAS AVANÇADAS", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 13, Enum.TextXAlignment.Center)
-
+-- PAGE 4
+mkLbl(M.page4, UDim2.new(0,15,0,20), UDim2.new(0,570,0,20), "🛠 FERRAMENTAS AVANÇADAS", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 13, Enum.TextXAlignment.Center)
 M.btnAutoAcc = Instance.new("TextButton")
-M.btnAutoAcc.Size = UDim2.new(0,570,0,32)
-M.btnAutoAcc.Position = UDim2.new(0,15,0,36)
+M.btnAutoAcc.Size = UDim2.new(0,570,0,40); M.btnAutoAcc.Position = UDim2.new(0,15,0,60)
 M.btnAutoAcc.BackgroundColor3 = M.C_PANEL
-M.btnAutoAcc.Text = "☑ AUTO-ACCEPT passivo (lucro >= " .. M.AUTO_MIN .. ")"
-M.btnAutoAcc.TextColor3 = M.C_GREEN
-M.btnAutoAcc.Font = Enum.Font.GothamBold
-M.btnAutoAcc.TextSize = 11
-M.btnAutoAcc.TextXAlignment = Enum.TextXAlignment.Left
-M.btnAutoAcc.BorderSizePixel = 0
-M.btnAutoAcc.Parent = M.page4
+M.btnAutoAcc.Text = "☑ AUTO-ACCEPT passivo"
+M.btnAutoAcc.TextColor3 = M.C_GREEN; M.btnAutoAcc.Font = Enum.Font.GothamBold
+M.btnAutoAcc.TextSize = 12; M.btnAutoAcc.TextXAlignment = Enum.TextXAlignment.Left
+M.btnAutoAcc.BorderSizePixel = 0; M.btnAutoAcc.Parent = M.page4
 Instance.new("UICorner", M.btnAutoAcc).CornerRadius = UDim.new(0, 6)
+M.btnPredator = mkBtn(M.page4, UDim2.new(0,15,0,115), UDim2.new(0,570,0,50), "🦁 PREDATOR — Alts (<=30d)", Color3.fromRGB(80,20,20), M.C_RED_BRIGHT)
 
-M.btnPredator = mkBtn(M.page4, UDim2.new(0,15,0,80), UDim2.new(0,570,0,44), "🦁 PREDATOR — Caçar contas novas", Color3.fromRGB(80,20,20), M.C_RED_BRIGHT)
-mkLbl(M.page4, UDim2.new(0,15,0,128), UDim2.new(0,570,0,16), "Envia requests para contas <= 30 dias (geralmente alts).", M.C_TEXT_DIM, Enum.Font.Gotham, 10, Enum.TextXAlignment.Center)
-
--- ============================================================
--- TOOLTIP (TAMBÉM COM FIX)
--- ============================================================
+-- TOOLTIP
 M.ttGui = Instance.new("ScreenGui")
 M.ttGui.Name = "MM2_ItemTooltip"
 M.ttGui.ResetOnSpawn = false
-M.ttGui.DisplayOrder = 1000
+M.ttGui.DisplayOrder = 2
 M.ttGui.Parent = PG
 
 M.ttFrame = Instance.new("Frame")
@@ -1111,7 +722,6 @@ M.ttFrame.Size = UDim2.new(0, 290, 0, 170)
 M.ttFrame.BackgroundColor3 = M.C_DARK
 M.ttFrame.BorderSizePixel = 0
 M.ttFrame.Visible = false
-M.ttFrame.Active = false
 M.ttFrame.Parent = M.ttGui
 Instance.new("UICorner", M.ttFrame).CornerRadius = UDim.new(0, 8)
 local ttStk = Instance.new("UIStroke", M.ttFrame); ttStk.Color = M.C_RED; ttStk.Thickness = 1.8
@@ -1123,272 +733,225 @@ M.ttLbl.Font = Enum.Font.Gotham; M.ttLbl.TextSize = 11
 M.ttLbl.TextXAlignment = Enum.TextXAlignment.Left; M.ttLbl.TextYAlignment = Enum.TextYAlignment.Top
 M.ttLbl.TextWrapped = true; M.ttLbl.Parent = M.ttFrame
 
-M.ttConn = nil
-M.attached = setmetatable({}, {__mode="k"})
-
-local function showTip(name, side)
-    local v = getVal(name)
-    if v <= 0 then return end
-    M.ttLbl.Text = string.format("%s\n─────────────\n💰 %s  |  📈 %d/10\n─────────────\n%s",
-        name, fmt(v), getDemand(name), predText(name))
-    M.ttFrame.Visible = true
-    local function upd()
-        local m = UIS:GetMouseLocation()
-        local vp = Vector2.new(1920,1080)
-        if workspace.CurrentCamera then vp = workspace.CurrentCamera.ViewportSize end
-        M.ttFrame.Position = UDim2.fromOffset(math.max(0, math.min(m.X + 15, vp.X - 300)), math.max(0, math.min(m.Y + 15, vp.Y - 180)))
-    end
-    upd()
-    if M.ttConn then M.ttConn:Disconnect() end
-    M.ttConn = UIS.InputChanged:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseMovement then upd() end
-    end)
+local function hideTip() if M.ttFrame then M.ttFrame.Visible = false end end
+local function resetUI()
+    if M.lblYour then M.lblYour.Text = "SEU: 0" end
+    if M.lblTheir then M.lblTheir.Text = "DELES: 0" end
+    if M.lblDiff then M.lblDiff.Text = "Diferença: 0"; M.lblDiff.TextColor3 = M.C_TEXT end
+    if M.lblStatus then M.lblStatus.Text = "Aguardando trade..."; M.lblStatus.TextColor3 = M.C_TEXT_DIM end
 end
 
-local function hideTip()
-    M.ttFrame.Visible = false
-    if M.ttConn then M.ttConn:Disconnect(); M.ttConn = nil end
-end
-
-local function attachTips(folder, side)
-    if not folder or not folder.Parent then return end
-    for _, o in ipairs(folder:GetDescendants()) do
-        if o:IsA("TextLabel") and o.Visible and not M.attached[o] then
-            local bn = parseStack(o.Text)
-            if getVal(bn) > 0 then
-                M.attached[o] = true
-                o.MouseEnter:Connect(function() showTip(bn, side) end)
-                o.MouseLeave:Connect(hideTip)
-                local p = o.Parent
-                if p and p:IsA("GuiObject") and not M.attached[p] then
-                    M.attached[p] = true
-                    p.MouseEnter:Connect(function() showTip(bn, side) end)
-                    p.MouseLeave:Connect(hideTip)
+-- BLACK SCREEN DETECT
+local function isBlackScreenActive()
+    for _, gui in ipairs(PG:GetChildren()) do
+        if gui:IsA("ScreenGui") and gui.Enabled and gui ~= M.gui and gui ~= M.ttGui then
+            local n = string.lower(gui.Name)
+            if n:find("black") or n:find("fade") or n:find("transition") or n:find("loading") or n:find("round") or n:find("cutscene") then
+                for _, desc in ipairs(gui:GetDescendants()) do
+                    if desc:IsA("Frame") and desc.Visible and desc.BackgroundTransparency < 0.3 then
+                        local sz = desc.AbsoluteSize
+                        if sz.X > 800 and sz.Y > 400 then
+                            return true
+                        end
+                    end
                 end
             end
         end
     end
+    return false
 end
 
--- ============================================================
--- UPDATES
--- ============================================================
-local function updateStats()
-    local t = string.format("📊 %d trades | Lucro: %s", M.stats.trades, fmt(M.stats.profit))
-    if M.stats.wins > 0 or M.stats.losses > 0 then
-        t = t .. string.format(" (%d✔/%d✖)", M.stats.wins, M.stats.losses)
+local function hideOurGUI()
+    if M.gui then M.gui.Enabled = false end
+    if M.ttGui then M.ttGui.Enabled = false end
+end
+
+local function showOurGUI()
+    if M.gui then M.gui.Enabled = true end
+    if M.ttGui then M.ttGui.Enabled = true end
+end
+
+-- SCAN TRADE
+local function scanTradeGUI()
+    if M.isRespawning or not isSafe() then return end
+    if isBlackScreenActive() then return end
+    if not M.gui or not M.gui.Enabled then return end
+    
+    local found = nil
+    for _, n in ipairs({"TradeGUI","TradeGui","Trade","TradingGUI","TradeMenu","TradeScreen"}) do
+        local g = PG:FindFirstChild(n)
+        if g and (not g:IsA("ScreenGui") or g.Enabled) then found = g; break end
     end
-    M.lblStats.Text = t
-    if M.stats.profit > 0 then M.lblStats.TextColor3 = M.C_GREEN
-    elseif M.stats.profit < 0 then M.lblStats.TextColor3 = M.C_RED_BRIGHT
-    else M.lblStats.TextColor3 = M.C_TEXT_DIM end
-end
-
-local function updateBL()
-    local items = {}
-    for k in pairs(M.blacklist) do table.insert(items, k) end
-    M.lblBL.Text = #items == 0 and "🚫 Blacklist vazia" or "🚫 " .. table.concat(items, ", ")
-end
-
-local function updPersonal()
-    if M.personalStats.tradesCount == 0 then
-        M.lblPersonal.Text = "📊 Sem trades ainda"
+    if not found then
+        for _, g in ipairs(PG:GetChildren()) do
+            if g:IsA("ScreenGui") and g.Enabled and string.lower(g.Name):find("trade") and g ~= M.gui and g ~= M.ttGui then 
+                found = g; break 
+            end
+        end
+    end
+    
+    if not found then
+        if M.tradeOpen then
+            M.tradeOpen = false
+            M.tradeGUI = nil; M.myFolder = nil; M.theirFolder = nil
+            if M.gui then M.gui.DisplayOrder = 1 end
+            if M.ttGui then M.ttGui.DisplayOrder = 2 end
+            pcall(hideTip); pcall(resetUI)
+        end
         return
     end
-    local avg = M.personalStats.profitSum / M.personalStats.tradesCount
-    local wr = M.stats.trades > 0 and (M.stats.wins/M.stats.trades*100) or 0
-    local tops = {}
-    for k, c in pairs(M.personalStats.itemsTraded) do table.insert(tops, {n=k, c=c}) end
-    table.sort(tops, function(a,b) return a.c > b.c end)
-    local top3 = {}
-    for i = 1, math.min(3, #tops) do table.insert(top3, string.format("%s (%dx)", tops[i].n, tops[i].c)) end
-    M.lblPersonal.Text = string.format("🏆 Melhor: %s\n💀 Pior: %s\n📊 Média: %s\n✅ %d✔ / %d✖ (%.0f%%)\n🔥 Top: %s",
-        fmt(M.personalStats.best.profit), fmt(M.personalStats.worst.profit), fmt(avg),
-        M.stats.wins, M.stats.losses, wr,
-        #top3 > 0 and table.concat(top3, ", ") or "—")
-end
-
-local function updFlip()
-    if M.stats.trades == 0 then M.lblFlip.Text = "⏳ Aguardando..."; return end
-    local el = math.max(1, tick() - M.flip.time)
-    local tD = M.stats.trades - M.flip.count
-    local pD = M.stats.profit - M.flip.profit
-    if tD == 0 then M.lblFlip.Text = "⏳ Aguardando..."; return end
-    local avg = pD / tD
-    local tpm = tD / (el / 60)
-    local hr = avg * tpm * 60
-    M.lblFlip.Text = string.format("📈 Média: %s/trade\n⚡ %.1f trades/min\n💰 Lucro/h: %s\n📅 Dia: %s\n🏆 Semana: %s",
-        fmt(avg), tpm, fmt(hr), fmt(hr*4), fmt(hr*4*7))
-end
-
-local function refreshAlerts()
-    for _, c in ipairs(M.alertList:GetChildren()) do
-        if c:IsA("Frame") then c:Destroy() end
-    end
-    for i, a in ipairs(M.priceAlerts) do
-        local row = Instance.new("Frame")
-        row.Size = UDim2.new(1,-8,0,34)
-        row.BackgroundColor3 = a.triggered and Color3.fromRGB(30,50,30) or Color3.fromRGB(25,20,25)
-        row.BorderSizePixel = 0
-        row.LayoutOrder = i
-        row.Parent = M.alertList
-        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1,-40,1,0)
-        lbl.Position = UDim2.new(0,6,0,0)
-        lbl.BackgroundTransparency = 1
-        local cmp = a.type == "below" and "≤" or "≥"
-        local icon = a.triggered and "✓" or "⏳"
-        lbl.Text = string.format("%s %s %s %s", icon, a.item, cmp, fmt(a.threshold))
-        lbl.TextColor3 = a.triggered and M.C_GREEN or M.C_TEXT
-        lbl.Font = Enum.Font.Gotham
-        lbl.TextSize = 10
-        lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.Parent = row
-        local rm = Instance.new("TextButton")
-        rm.Size = UDim2.new(0,26,0,26)
-        rm.Position = UDim2.new(1,-30,0.5,-13)
-        rm.BackgroundColor3 = Color3.fromRGB(80,20,20)
-        rm.Text = "✖"
-        rm.TextColor3 = M.C_RED_BRIGHT
-        rm.Font = Enum.Font.GothamBlack
-        rm.TextSize = 12
-        rm.BorderSizePixel = 0
-        rm.Parent = row
-        Instance.new("UICorner", rm).CornerRadius = UDim.new(0, 4)
-        rm.MouseButton1Click:Connect(function()
-            table.remove(M.priceAlerts, i)
-            refreshAlerts()
-        end)
-    end
-end
-
-local function resetUI()
-    M.lblYour.Text = "SEU: 0"; M.lblTheir.Text = "DELES: 0"
-    M.lblMaxY.Text = "Mais caro: —"; M.lblMaxT.Text = "Mais caro: —"
-    M.lblDemY.Text = "Demanda: 1/10"; M.lblDemT.Text = "Demanda: 1/10"
-    M.lblDiff.Text = "Diferença: 0"; M.lblDiff.TextColor3 = M.C_TEXT
-    M.lblStatus.Text = "Aguardando trade..."; M.lblStatus.TextColor3 = M.C_TEXT_DIM
-    M.btnNW.Text = "◈ CALCULAR NET WORTH"
-end
-
--- CompleteTrade
-pcall(function()
-    if not M.TradeFolder then return end
-    local ct = M.TradeFolder:FindFirstChild("CompleteTrade")
-    if not ct then return end
-    ct.OnClientEvent:Connect(function()
-        if M.lastMyVal > 0 or M.lastTheirVal > 0 then
-            local p = M.lastTheirVal - M.lastMyVal
-            M.stats.trades = M.stats.trades + 1
-            M.stats.profit = M.stats.profit + p
-            if p > 0 then M.stats.wins = M.stats.wins + 1
-            elseif p < 0 then M.stats.losses = M.stats.losses + 1 end
-            updateStats()
-            local ps = M.personalStats
-            ps.tradesCount = ps.tradesCount + 1
-            ps.profitSum = ps.profitSum + p
-            if p > ps.best.profit then ps.best = {profit=p, time=os.date("%H:%M")} end
-            if ps.tradesCount == 1 or p < ps.worst.profit then ps.worst = {profit=p, time=os.date("%H:%M")} end
-            if M.flip.count == 0 then M.flip = {time=tick(), profit=M.stats.profit-p, count=M.stats.trades-1} end
-            M.lastMyVal = 0
-            M.lastTheirVal = 0
+    
+    M.tradeGUI = found
+    
+    local myF, theirF = nil, nil
+    for _, o in ipairs(found:GetDescendants()) do
+        if o:IsA("GuiObject") and o.Visible then
+            local ln = string.lower(o.Name)
+            if not myF and (ln:find("youroffer") or ln:find("myoffer") or ln:find("useroffer") or ln:find("playeroffer") or ln:find("youritems") or ln:find("myitems") or ln:find("playeritems")) then
+                myF = o
+            elseif not theirF and (ln:find("theiroffer") or ln:find("otheroffer") or ln:find("partneroffer") or ln:find("theiritems") or ln:find("otheritems") or ln:find("partneritems")) then
+                theirF = o
+            end
+            if myF and theirF then break end
         end
+    end
+    
+    if myF and theirF then
+        M.myFolder = myF; M.theirFolder = theirF
+        M.tradeOpen = true
+        if M.gui then M.gui.DisplayOrder = 999 end
+        if M.ttGui then M.ttGui.DisplayOrder = 1000 end
+    else
+        M.tradeOpen = false
+    end
+end
+
+-- RESPAWN TRACKING
+LP.CharacterRemoving:Connect(function()
+    M.isRespawning = true
+    M.tradeOpen = false
+    M.tradeGUI = nil; M.myFolder = nil; M.theirFolder = nil
+    pcall(hideOurGUI)
+    if M.gui then M.gui.DisplayOrder = 1 end
+    if M.ttGui then M.ttGui.DisplayOrder = 2 end
+    pcall(hideTip); pcall(resetUI)
+end)
+
+LP.CharacterAdded:Connect(function(char)
+    task.spawn(function()
+        task.wait(4)
+        local timeout = 0
+        while timeout < 15 do
+            if char and char.Parent and char:FindFirstChildOfClass("Humanoid") and char:FindFirstChildOfClass("Humanoid").Health > 0 then break end
+            task.wait(0.5); timeout = timeout + 0.5
+        end
+        timeout = 0
+        while timeout < 15 do
+            if not isBlackScreenActive() then break end
+            task.wait(0.5); timeout = timeout + 0.5
+        end
+        task.wait(2)
+        M.isRespawning = false
+        pcall(showOurGUI)
+        if M.gui then M.gui.DisplayOrder = 1 end
+        if M.ttGui then M.ttGui.DisplayOrder = 2 end
+        pcall(scanTradeGUI)
     end)
 end)
 
--- ============================================================
--- HANDLERS
--- ============================================================
-M.btnNW.MouseButton1Click:Connect(function()
-    M.btnNW.Text = "◈ Lendo..."
-    task.spawn(function()
-        task.wait(0.2)
-        local inv = getInv()
-        local tot = 0
-        for _, n in ipairs(inv) do tot = tot + getVal(n) end
-        if tot > 0 then
-            M.btnNW.Text = "◈ Mochila: " .. fmt(tot) .. " (" .. #inv .. ")"
-            M.btnNW.TextColor3 = M.C_GREEN
-        else
-            M.btnNW.Text = "◈ Falha"
-            M.btnNW.TextColor3 = M.C_RED_BRIGHT
+PG.ChildAdded:Connect(function(child)
+    if child:IsA("ScreenGui") and (child.Name:find("Trade") or child.Name:find("trade")) and child ~= M.gui and child ~= M.ttGui then
+        task.defer(function() task.wait(0.3); pcall(scanTradeGUI) end)
+    end
+end)
+
+PG.ChildRemoved:Connect(function(child)
+    if child == M.tradeGUI then
+        M.tradeGUI = nil; M.myFolder = nil; M.theirFolder = nil; M.tradeOpen = false
+        if M.gui then M.gui.DisplayOrder = 1 end
+        if M.ttGui then M.ttGui.DisplayOrder = 2 end
+        pcall(hideTip); pcall(resetUI)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if not M.isRespawning and M.gui and M.gui.Enabled then
+            if isBlackScreenActive() then pcall(hideOurGUI) end
         end
-    end)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(5)
+        if not M.isRespawning and isSafe() and not isBlackScreenActive() then
+            pcall(function()
+                if M.gui and M.gui.Parent ~= PG then M.gui.Parent = PG; M.gui.Enabled = true end
+                if M.ttGui and M.ttGui.Parent ~= PG then M.ttGui.Parent = PG; M.ttGui.Enabled = true end
+            end)
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if not M.isRespawning and isSafe() and not isBlackScreenActive() then pcall(scanTradeGUI) end
+    end
+end)
+
+-- UPDATES
+local function updateStats()
+    local t = string.format("📊 %d trades | Lucro: %s (%d✔/%d✖)", M.stats.trades, fmt(M.stats.profit), M.stats.wins, M.stats.losses)
+    if M.lblStats and M.lblStats.Text ~= t then M.lblStats.Text = t end
+end
+
+-- HANDLERS
+M.btnTA.MouseButton1Click:Connect(function()
+    if not M.tradeOpen then return end
+    fire(M.AcceptEvt)
+    if M.tradeGUI then for _, b in ipairs(findBtns(M.tradeGUI, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end end
+end)
+
+M.btnTR.MouseButton1Click:Connect(function()
+    if not M.tradeOpen then return end
+    fire(M.DeclineEvt)
+    if M.tradeGUI then for _, b in ipairs(findBtns(M.tradeGUI, DECLINE_KW)) do clickBtn(b); task.wait(0.1) end end
 end)
 
 M.btnAR.MouseButton1Click:Connect(function()
     M.autoRejectLowball = not M.autoRejectLowball
-    if M.autoRejectLowball then
-        M.btnAR.Text = "☑ Rejeitar Lowball (< 50%)"
-        M.btnAR.TextColor3 = M.C_GREEN
-    else
-        M.btnAR.Text = "☐ Rejeitar Lowball (< 50%)"
-        M.btnAR.TextColor3 = M.C_TEXT_DIM
-    end
+    M.btnAR.Text = M.autoRejectLowball and "☑ Rejeitar Lowball" or "☐ Rejeitar Lowball"
+    M.btnAR.TextColor3 = M.autoRejectLowball and M.C_GREEN or M.C_TEXT_DIM
 end)
 
 M.btnDup.MouseButton1Click:Connect(function()
     M.onlyDuplicates = not M.onlyDuplicates
-    if M.onlyDuplicates then
-        M.btnDup.Text = "☑ Só duplicados (2+)"
-        M.btnDup.TextColor3 = M.C_GREEN
-    else
-        M.btnDup.Text = "☐ Só duplicados (2+)"
-        M.btnDup.TextColor3 = M.C_TEXT_DIM
-    end
+    M.btnDup.Text = M.onlyDuplicates and "☑ Só duplicados" or "☐ Só duplicados"
+    M.btnDup.TextColor3 = M.onlyDuplicates and M.C_GREEN or M.C_TEXT_DIM
 end)
 
-M.btnAddBL.MouseButton1Click:Connect(function()
-    local n = M.inBL.Text
-    if n ~= "" then
-        M.blacklist[n] = true
-        M.inBL.Text = ""
-        updateBL()
-    end
-end)
-
-M.btnTA.MouseButton1Click:Connect(function()
-    if not isOpen() then return end
-    fire(M.AcceptEvt)
-    local g = getTradeGUI()
-    if g then
-        for _, b in ipairs(findBtns(g, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end
-    end
-    M.lblAuto.Text = "✅ ACCEPT disparado"
-    M.lblAuto.TextColor3 = M.C_GREEN
-end)
-
-M.btnTR.MouseButton1Click:Connect(function()
-    if not isOpen() then return end
-    fire(M.DeclineEvt)
-    local g = getTradeGUI()
-    if g then
-        for _, b in ipairs(findBtns(g, DECLINE_KW)) do clickBtn(b); task.wait(0.1) end
-    end
-    M.lblAuto.Text = "❌ REJECT disparado"
-    M.lblAuto.TextColor3 = M.C_RED_BRIGHT
-end)
-
-M.btnCmp.MouseButton1Click:Connect(function()
-    local a = M.inA.Text
-    local b = M.inB.Text
-    if a == "" or b == "" then return end
-    M.lblCmp.Text = compareItems(a, b)
-    M.lblCmp.TextColor3 = M.C_TEXT
+M.btnAutoAcc.MouseButton1Click:Connect(function()
+    M.autoAcceptProfit = not M.autoAcceptProfit
+    M.btnAutoAcc.Text = M.autoAcceptProfit and "☑ AUTO-ACCEPT passivo" or "☐ AUTO-ACCEPT passivo"
+    M.btnAutoAcc.TextColor3 = M.autoAcceptProfit and M.C_GREEN or M.C_TEXT_DIM
 end)
 
 M.btnRev.MouseButton1Click:Connect(function()
     local target = tonumber(M.inTarget.Text)
-    if not target or target <= 0 then M.lblTools.Text = "⚠ Valor inválido"; return end
+    if not target or target <= 0 then 
+        M.lblTools.Text = "⚠ Valor inválido"
+        M.lblTools.TextColor3 = M.C_RED_BRIGHT
+        return 
+    end
     local inv = getInv()
     local counts = {}
     for _, n in ipairs(inv) do counts[n] = (counts[n] or 0) + 1 end
     local list = {}
     for n, c in pairs(counts) do
-        if not M.blacklist[n] then
-            table.insert(list, {name=n, value=getVal(n), count=c})
-        end
+        if not M.blacklist[n] then table.insert(list, {name=n, value=getVal(n), count=c}) end
     end
     table.sort(list, function(a,b) return a.value > b.value end)
     local best, bestSum = nil, -1
@@ -1412,7 +975,7 @@ M.btnRev.MouseButton1Click:Connect(function()
     end
     search({}, 0, 1)
     if best and #best > 0 then
-        M.lblTools.Text = string.format("🎯 %s → %s (%s)", fmt(target), table.concat(best, " + "), fmt(bestSum))
+        M.lblTools.Text = string.format("🎯 Alvo: %s\nSugestão:\n%s\nTotal: %s", fmt(target), table.concat(best, " + "), fmt(bestSum))
         M.lblTools.TextColor3 = M.C_GREEN
     else
         M.lblTools.Text = "⚠ Nada encontrado"
@@ -1420,96 +983,49 @@ M.btnRev.MouseButton1Click:Connect(function()
     end
 end)
 
-M.btnAType.MouseButton1Click:Connect(function()
-    M.alertType = M.alertType == "above" and "below" or "above"
-    if M.alertType == "above" then
-        M.btnAType.Text = "acima ▴"
-        M.btnAType.TextColor3 = M.C_GREEN
-    else
-        M.btnAType.Text = "abaixo ▾"
-        M.btnAType.TextColor3 = M.C_RED_BRIGHT
+M.btnCmp.MouseButton1Click:Connect(function()
+    local a, b = M.inA.Text, M.inB.Text
+    if a == "" or b == "" then return end
+    local va, vb = getVal(a), getVal(b)
+    if va == 0 then M.lblCmp.Text = string.format("❌ '%s' inválido", a); return end
+    if vb == 0 then M.lblCmp.Text = string.format("❌ '%s' inválido", b); return end
+    local diff = va - vb
+    M.lblCmp.Text = string.format("A: %s = %s\nB: %s = %s\n\nDiferença: %s\n%s vale %.1fx mais",
+        a, fmt(va), b, fmt(vb), fmt(math.abs(diff)),
+        va > vb and a or b, math.max(va,vb) / math.max(1, math.min(va,vb)))
+    M.lblCmp.TextColor3 = M.C_TEXT
+end)
+
+M.btnAddBL.MouseButton1Click:Connect(function()
+    if M.inBL.Text ~= "" then
+        M.blacklist[M.inBL.Text] = true
+        M.inBL.Text = ""
+        local items = {}
+        for k in pairs(M.blacklist) do table.insert(items, k) end
+        M.lblBL.Text = "🚫 " .. table.concat(items, ", ")
     end
 end)
 
-M.btnAddAlert.MouseButton1Click:Connect(function()
-    local item = M.inAItem.Text
-    local v = tonumber(M.inAVal.Text)
-    if item == "" or not v or v <= 0 then return end
-    table.insert(M.priceAlerts, {item=getExact(item), type=M.alertType, threshold=v, triggered=false})
-    M.inAItem.Text = ""
-    M.inAVal.Text = ""
-    refreshAlerts()
-    M.lblAuto.Text = "🔔 Alerta adicionado"
-    M.lblAuto.TextColor3 = M.C_GREEN
-end)
-
--- Presets
-for i = 1, 3 do
-    local slot = i
-    M.pSaves[slot].MouseButton1Click:Connect(function()
-        local txt = M.pInputs[slot].Text
-        if not txt or txt == "" then return end
-        M.presetTexts[slot] = txt
-        M.pLoads[slot].BackgroundColor3 = Color3.fromRGB(30,100,40)
-        M.lblAuto.Text = "💾 Slot " .. slot .. " salvo"
-        M.lblAuto.TextColor3 = M.C_GREEN
-    end)
-    M.pLoads[slot].MouseButton1Click:Connect(function()
-        if not M.presetTexts[slot] then return end
-        local o = isOpen()
-        if not o then M.lblAuto.Text = "⚠ Abra trade"; return end
-        local parts = {}
-        local n = M.presetTexts[slot]:gsub("%s+and%s+", ","):gsub("%s+e%s+", ",")
-        for p in n:gmatch("[^,]+") do table.insert(parts, p) end
-        task.spawn(function()
-            local added = 0
-            for _, p in ipairs(parts) do
-                p = p:match("^%s*(.-)%s*$")
-                local qty, nm = 1, p
-                local m1, q1 = p:match("^(.-)%s*x%s*(%d+)$")
-                if m1 and q1 then nm = m1; qty = tonumber(q1)
-                else
-                    local q2, m2 = p:match("^(%d+)%s*x%s*(.+)$")
-                    if q2 and m2 then qty = tonumber(q2); nm = m2 end
-                end
-                nm = getExact(nm:match("^%s*(.-)%s*$"))
-                if getVal(nm) > 0 then
-                    for _ = 1, qty do
-                        local o2, mf2 = isOpen()
-                        if not o2 then break end
-                        local before = folderStats(mf2)
-                        pcall(function() M.OfferEvt:FireServer(nm) end)
-                        for _ = 1, 8 do
-                            task.wait(0.15)
-                            if folderStats(mf2) > before then added = added + 1; break end
-                        end
-                    end
-                end
-            end
-            M.lblAuto.Text = string.format("✔ Slot %d: %d itens", slot, added)
-            M.lblAuto.TextColor3 = M.C_GREEN
-        end)
-    end)
-    M.pLoads[slot].InputBegan:Connect(function(inp)
-        if inp.UserInputType == Enum.UserInputType.MouseButton2 then
-            M.presetTexts[slot] = nil
-            M.pInputs[slot].Text = ""
-            M.pLoads[slot].BackgroundColor3 = Color3.fromRGB(50,50,50)
-        end
-    end)
-end
-
--- Generate
+-- GENERATE
 local function genOffer()
     if M.isGenerating or not isSafe() then return end
-    local o, _, tf = isOpen()
-    if not o then M.lblAuto.Text = "⚠ Abra trade"; return end
-    if not M.OfferEvt then M.lblAuto.Text = "⚠ Remote não achado"; return end
-    local _, tV = folderStats(tf)
-    if tV <= 0 then M.lblAuto.Text = "⚠ Parceiro sem itens"; return end
+    if not M.tradeOpen or not M.myFolder or not M.theirFolder then 
+        M.lblAuto.Text = "⚠ Abra a trade primeiro"
+        M.lblAuto.TextColor3 = M.C_RED_BRIGHT
+        return 
+    end
+    if not M.OfferEvt then M.lblAuto.Text = "⚠ Sem remote Offer"; return end
     M.isGenerating = true
     M.lblAuto.Text = "🔍 Calculando..."
+    M.lblAuto.TextColor3 = M.C_YELLOW
     task.spawn(function()
+        local _, tV = folderStats(M.theirFolder)
+        if tV <= 0 then 
+            M.lblAuto.Text = "⚠ Parceiro sem itens"
+            M.lblAuto.TextColor3 = M.C_RED_BRIGHT
+            M.isGenerating = false
+            return 
+        end
         local inv = getInv()
         local counts = {}
         for _, n in ipairs(inv) do counts[n] = (counts[n] or 0) + 1 end
@@ -1519,7 +1035,7 @@ local function genOffer()
                 table.insert(list, {name=n, value=getVal(n), count=c})
             end
         end
-        table.sort(list, function(a,b) return a.value > b.value end)
+        table.sort(list, function(x,y) return x.value > y.value end)
         local best, bestSum = nil, -1
         local function search(combo, sum, si)
             if sum <= tV and sum > bestSum then
@@ -1540,20 +1056,19 @@ local function genOffer()
             end
         end
         search({}, 0, 1)
-        if not best or #best == 0 then
+        if not best or #best == 0 then 
             M.lblAuto.Text = "⚠ Sem itens"
+            M.lblAuto.TextColor3 = M.C_RED_BRIGHT
             M.isGenerating = false
-            return
+            return 
         end
         M.lblAuto.Text = "🧹 Limpando..."
         local safety = 0
-        while M.isGenerating and isSafe() do
-            local oo, mf = isOpen()
-            if not oo then M.isGenerating = false; return end
-            if folderStats(mf) <= 0 or safety >= 20 then break end
+        while M.tradeOpen and isSafe() and safety < 20 do
             safety = safety + 1
+            if folderStats(M.myFolder) <= 0 then break end
             local f = nil
-            for _, obj in ipairs(mf:GetDescendants()) do
+            for _, obj in ipairs(M.myFolder:GetDescendants()) do
                 if obj:IsA("GuiObject") and obj.Visible then
                     local t = (obj:IsA("TextLabel") and obj.Text) or obj.Name or ""
                     local bn = parseStack(t)
@@ -1567,330 +1082,252 @@ local function genOffer()
         M.lblAuto.Text = "✔ Adicionando..."
         local fs = 0
         for _, n in ipairs(best) do
-            local oo, mf = isOpen()
-            if not oo then M.isGenerating = false; return end
-            local before = folderStats(mf)
+            if not M.tradeOpen then break end
             pcall(function() M.OfferEvt:FireServer(getExact(n)) end)
-            for _ = 1, 8 do
-                task.wait(0.15)
-                if folderStats(mf) > before then fs = fs + getVal(n); break end
-            end
+            task.wait(0.3)
+            fs = fs + getVal(n)
         end
         M.lblAuto.Text = string.format("✔ Seu: %s | Deles: %s\nLucro: %s", fmt(fs), fmt(tV), fmt(tV - fs))
         M.lblAuto.TextColor3 = M.C_GREEN
         M.isGenerating = false
     end)
 end
-
 M.btnGen.MouseButton1Click:Connect(genOffer)
 
 M.btnClr.MouseButton1Click:Connect(function()
-    if M.isClearing or not isSafe() then return end
-    local o = isOpen()
-    if not o then return end
+    if M.isClearing or not M.tradeOpen or not M.myFolder then 
+        M.lblAuto.Text = "⚠ Abra a trade primeiro"
+        return
+    end
     M.isClearing = true
+    M.lblAuto.Text = "🧹 Limpando..."
     task.spawn(function()
         local safety = 0
-        while M.isClearing and isSafe() do
-            local oo, mf = isOpen()
-            if not oo then M.isClearing = false; return end
+        while M.tradeOpen and isSafe() and safety < 40 do
             safety = safety + 1
-            if safety >= 40 or folderStats(mf) <= 0 then break end
+            if folderStats(M.myFolder) <= 0 then break end
             local f = nil
-            for _, obj in ipairs(mf:GetDescendants()) do
+            for _, obj in ipairs(M.myFolder:GetDescendants()) do
                 if obj:IsA("GuiObject") and obj.Visible then
                     local t = (obj:IsA("TextLabel") and obj.Text) or obj.Name or ""
                     local bn = parseStack(t)
                     if getVal(bn) > 0 then f = bn; break end
                 end
             end
-            if f and M.RemoveEvt then
-                pcall(function() M.RemoveEvt:FireServer(getExact(f)) end)
-                task.wait(0.2)
-            end
+            if f and M.RemoveEvt then pcall(function() M.RemoveEvt:FireServer(getExact(f)) end) end
+            task.wait(0.2)
         end
         M.isClearing = false
+        M.lblAuto.Text = "✔ Limpo"
+        M.lblAuto.TextColor3 = M.C_GREEN
     end)
 end)
 
--- Tools Functions
+-- ============================================================
+-- ⭐ TOP 5 RICOS: TENTA TODOS OS REMOTES + TODOS OS FORMATOS
+-- ============================================================
 local function getPlayerWealth(p)
     local ls = p:FindFirstChild("leaderstats")
     if ls then
         for _, n in ipairs({"Value","Coins","Money","Cash","Wealth","Gems","Wins"}) do
             local s = ls:FindFirstChild(n)
-            if s and typeof(s.Value) == "number" then return s.Value, "leaderstats:"..n end
+            if s and typeof(s.Value) == "number" then return s.Value end
         end
     end
-    local st = p:FindFirstChild("Stats") or p:FindFirstChild("PlayerStats")
-    if st then
-        for _, n in ipairs({"Value","Coins","Money","Cash"}) do
-            local s = st:FindFirstChild(n)
-            if s and typeof(s.Value) == "number" then return s.Value, "stats:"..n end
-        end
-    end
-    return 0, "unknown"
+    return 0
 end
 
-local function sendAndWait(targetPlayer, index, total)
+-- ⭐ Envia request tentando TODOS os remotes e TODOS os formatos
+local function attemptSend(targetPlayer, index, total)
     if not targetPlayer or not targetPlayer.Parent then return false end
     
-    local remote = getSendTradeRemote()
-    if not remote then
-        M.lblTools.Text = "⚠ Remote SendTradeRequest NÃO encontrado no jogo."
+    local remotes = findAllSendRemotes()
+    if #remotes == 0 then
+        M.lblTools.Text = "⚠ NENHUM REMOTE ENCONTRADO!\nVeja o console (F9)"
         M.lblTools.TextColor3 = M.C_RED_BRIGHT
         return false
     end
     
-    local success, err = false, ""
-    if remote:IsA("RemoteEvent") then
-        success, err = pcall(function() remote:FireServer(targetPlayer) end)
-        if not success then
-            success, err = pcall(function() remote:FireServer(targetPlayer.Name) end)
-        end
-    else
-        success, err = pcall(function() remote:InvokeServer(targetPlayer) end)
-        if not success then
-            success, err = pcall(function() remote:InvokeServer(targetPlayer.Name) end)
+    local succeeded = false
+    local usedInfo = ""
+    
+    -- Tenta cada remote
+    for ri, remote in ipairs(remotes) do
+        if succeeded then break end
+        
+        -- Tenta cada formato de argumento
+        local args = {
+            {targetPlayer,          "Player"},
+            {targetPlayer.Name,     "Name"},
+            {targetPlayer.UserId,   "UserId"},
+            {tostring(targetPlayer.UserId), "UserId-String"},
+        }
+        
+        for ai, arg in ipairs(args) do
+            if succeeded then break end
+            local ok, err
+            if remote:IsA("RemoteEvent") then
+                ok, err = pcall(function() remote:FireServer(arg[1]) end)
+            else
+                ok, err = pcall(function() remote:InvokeServer(arg[1]) end)
+            end
+            
+            if ok then
+                succeeded = true
+                usedInfo = string.format("%s / %s", remote.Name, arg[2])
+                M.lastSendMethod = usedInfo
+                print(string.format("[REQUEST] ✅ %s via %s → %s", targetPlayer.Name, remote.Name, arg[2]))
+            end
+            task.wait(0.1) -- pequeno delay entre tentativas
         end
     end
     
-    if not success then
-        M.lblTools.Text = string.format("❌ Erro ao enviar para %s:\n%s\nTentando próximo...", targetPlayer.Name, tostring(err))
+    if not succeeded then
+        M.lblTools.Text = string.format("❌ Falha com %s\n%d remotes x 4 formatos tentados.\nVeja console (F9)", targetPlayer.Name, #remotes)
         M.lblTools.TextColor3 = M.C_RED_BRIGHT
         task.wait(2)
         return false
     end
     
-    -- Espera 25 segundos
-    local waitTime = 25
-    local timer = 0
-    local accepted = false
+    M.lblTools.Text = string.format("💎 [%d/%d] → %s\n✅ %s\nEsperando 25s...", index, total, targetPlayer.Name, usedInfo)
+    M.lblTools.TextColor3 = M.C_YELLOW
     
-    while timer < waitTime and M.isSendingRequests do
+    -- Espera 25s pela trade abrir OU player mudar
+    local timer = 0
+    while timer < 25 and M.isSendingRequests do
         task.wait(0.5)
         timer = timer + 0.5
-        
-        if isOpen() then
-            accepted = true
-            break
+        if M.tradeOpen then
+            M.lblTools.Text = string.format("💎 %s ACEITOU!", targetPlayer.Name)
+            M.lblTools.TextColor3 = M.C_GREEN
+            M.isSendingRequests = false
+            return true
         end
     end
     
-    if accepted then
-        M.lblTools.Text = string.format("💎 %s ACEITOU!\nPausando envio para negociar.", targetPlayer.Name)
-        M.lblTools.TextColor3 = M.C_GREEN
-        M.isSendingRequests = false
-    else
-        M.lblTools.Text = string.format("💎 [%d/%d] %s ignorou/recusou.\nIndo para o próximo...", index, total, targetPlayer.Name)
-        M.lblTools.TextColor3 = M.C_TEXT_DIM
-    end
-    return accepted
+    M.lblTools.Text = string.format("💎 [%d/%d] %s não respondeu.\nPróximo...", index, total, targetPlayer.Name)
+    M.lblTools.TextColor3 = M.C_TEXT_DIM
+    return false
 end
 
 local function runRichest()
-    local remote = getSendTradeRemote()
-    if not remote then
-        M.lblTools.Text = "⚠ Remote SendTradeRequest NÃO encontrado."
+    if M.isSendingRequests then return end
+    
+    -- Verifica remote antes
+    local remotes = findAllSendRemotes()
+    if #remotes == 0 then
+        M.lblTools.Text = "⚠ NENHUM REMOTE ENCONTRADO!\nAbra o console (F9) e me mande\nos remotes que aparecem no RS."
         M.lblTools.TextColor3 = M.C_RED_BRIGHT
         return
     end
-    if M.isSendingRequests then
-        M.lblTools.Text = "💎 Já está enviando... (aguarde)"
-        M.lblTools.TextColor3 = M.C_YELLOW
-        return
-    end
+    
     M.isSendingRequests = true
-    
-    M.lblTools.Text = "💎 Coletando os 5 mais ricos do servidor..."
-    M.lblTools.TextColor3 = M.C_YELLOW
-    
     task.spawn(function()
+        M.lblTools.Text = string.format("💎 Coletando TOP 5...\n(%d remotes disponíveis)", #remotes)
+        M.lblTools.TextColor3 = M.C_YELLOW
+        
         local list = {}
         for _, pl in ipairs(Players:GetPlayers()) do
             if pl ~= LP and pl.Character then
-                local w, src = getPlayerWealth(pl)
-                table.insert(list, {player=pl, wealth=w, age=pl.AccountAge or 0, src=src})
+                table.insert(list, {player=pl, wealth=getPlayerWealth(pl), age=pl.AccountAge or 0})
             end
         end
         table.sort(list, function(a,b)
             if a.wealth ~= b.wealth then return a.wealth > b.wealth end
             return a.age > b.age
         end)
-        
-        if #list == 0 then
-            M.lblTools.Text = "💎 Nenhum jogador disponível."
+        if #list == 0 then 
+            M.lblTools.Text = "💎 Nenhum jogador."
             M.lblTools.TextColor3 = M.C_TEXT_DIM
             M.isSendingRequests = false
-            return
+            return 
         end
         
         local limit = math.min(#list, 5)
-        
         for i = 1, limit do
             if not M.isSendingRequests then break end
-            local entry = list[i]
-            local pl = entry.player
+            local pl = list[i].player
             if pl.Parent and pl.Character then
-                M.lblTools.Text = string.format("💎 Enviando [%d/%d] → %s\n(Esperando 25s...)", i, limit, pl.Name)
-                M.lblTools.TextColor3 = M.C_YELLOW
-                sendAndWait(pl, i, limit)
+                attemptSend(pl, i, limit)
             end
         end
-        
         if M.isSendingRequests then
-            M.lblTools.Text = "💎 Terminou o envio para os TOP 5."
-            M.lblTools.TextColor3 = M.C_TEXT_DIM
+            M.lblTools.Text = string.format("💎 Terminou TOP %d", limit)
+            M.lblTools.TextColor3 = M.C_GREEN
             M.isSendingRequests = false
         end
     end)
 end
 
 local function runPredator()
-    local remote = getSendTradeRemote()
-    if not remote then
-        M.lblTools.Text = "⚠ Remote SendTradeRequest NÃO encontrado."
+    if M.isSendingRequests then return end
+    local remotes = findAllSendRemotes()
+    if #remotes == 0 then
+        M.lblTools.Text = "⚠ NENHUM REMOTE ENCONTRADO!"
         M.lblTools.TextColor3 = M.C_RED_BRIGHT
         return
     end
-    if M.isSendingRequests then
-        M.lblTools.Text = "🦁 Já está enviando... (aguarde)"
-        M.lblTools.TextColor3 = M.C_YELLOW
-        return
-    end
     M.isSendingRequests = true
-    
-    M.lblTools.Text = "🦁 Escaneando contas novas..."
-    M.lblTools.TextColor3 = M.C_YELLOW
     task.spawn(function()
         local list = {}
         for _, pl in ipairs(Players:GetPlayers()) do
-            if pl ~= LP and pl.Character then
-                local age = pl.AccountAge or 9999
-                if age <= 30 then
-                    table.insert(list, {player=pl, age=age})
-                end
+            if pl ~= LP and pl.Character and (pl.AccountAge or 9999) <= 30 then
+                table.insert(list, {player=pl, age=pl.AccountAge})
             end
         end
         table.sort(list, function(a,b) return a.age < b.age end)
-        
-        if #list == 0 then
-            M.lblTools.Text = "🦁 Nenhuma conta nova (<=30 dias) encontrada."
+        if #list == 0 then 
+            M.lblTools.Text = "🦁 Nenhuma conta nova"
             M.lblTools.TextColor3 = M.C_TEXT_DIM
             M.isSendingRequests = false
-            return
+            return 
         end
-        
         for i, entry in ipairs(list) do
             if not M.isSendingRequests then break end
-            local pl = entry.player
-            if pl.Parent and pl.Character then
-                M.lblTools.Text = string.format("🦁 Enviando [%d/%d] → %s (%dd)\n(Esperando 25s...)", i, #list, pl.Name, entry.age)
-                M.lblTools.TextColor3 = M.C_YELLOW
-                sendAndWait(pl, i, #list)
-            end
+            if entry.player.Parent then attemptSend(entry.player, i, #list) end
         end
-        
-        if M.isSendingRequests then
-            M.lblTools.Text = "🦁 Terminou a lista de contas novas."
-            M.lblTools.TextColor3 = M.C_TEXT_DIM
-            M.isSendingRequests = false
+        if M.isSendingRequests then 
+            M.lblTools.Text = "🦁 Terminou."
+            M.lblTools.TextColor3 = M.C_GREEN
+            M.isSendingRequests = false 
         end
     end)
 end
 
 local function runArbitrage()
-    local o, mf, tf = isOpen()
-    if not o then
-        M.lblTools.Text = "🔮 Abra uma trade com itens dos dois lados primeiro."
-        M.lblTools.TextColor3 = M.C_YELLOW
+    if not M.tradeOpen then 
+        M.lblTools.Text = "🔮 Abra trade primeiro."
         return
     end
-    local mV = folderFull(mf)
-    local tV = folderFull(tf)
-    if mV <= 0 or tV <= 0 then
-        M.lblTools.Text = "🔮 Precisa haver itens nos DOIS lados da trade."
-        M.lblTools.TextColor3 = M.C_YELLOW
+    local mV = folderFull(M.myFolder); local tV = folderFull(M.theirFolder)
+    if mV <= 0 or tV <= 0 then 
+        M.lblTools.Text = "🔮 Sem itens nos 2 lados."
         return
     end
-    local diff = tV - mV
-    local pct = (diff / mV) * 100
-    local icon, msg, col
+    local diff = tV - mV; local pct = (diff/mV)*100
     if diff > 0 and pct >= 20 then
-        icon, msg, col = "🟢", string.format("ARBITRAGE ENCONTRADA!\nLucro: +%s (+%.0f%%)\nDeles: %s\nSeu: %s\n→ ACEITE AGORA", fmt(diff), pct, fmt(tV), fmt(mV)), M.C_GREEN
+        M.lblTools.Text = string.format("🟢 LUCRO: +%s (+%.0f%%)", fmt(diff), pct)
+        M.lblTools.TextColor3 = M.C_GREEN
     elseif diff > 0 then
-        icon, msg, col = "🟡", string.format("Lucro pequeno: +%s (+%.0f%%)\nDeles: %s | Seu: %s\n→ Aceitável, mas não ideal", fmt(diff), pct, fmt(tV), fmt(mV)), M.C_YELLOW
-    elseif diff < 0 then
-        icon, msg, col = "🔴", string.format("PREJUÍZO: %s (%.0f%%)\nDeles: %s | Seu: %s\n→ NÃO ACEITE", fmt(diff), pct, fmt(tV), fmt(mV)), M.C_RED_BRIGHT
+        M.lblTools.Text = string.format("🟡 Lucro: +%s (+%.0f%%)", fmt(diff), pct)
+        M.lblTools.TextColor3 = M.C_YELLOW
     else
-        icon, msg, col = "⚖", "Trade justa (0% lucro).", M.C_TEXT
+        M.lblTools.Text = string.format("🔴 Prejuízo: %s", fmt(diff))
+        M.lblTools.TextColor3 = M.C_RED_BRIGHT
     end
-    M.lblTools.Text = icon .. " " .. msg
-    M.lblTools.TextColor3 = col
 end
 
--- Tools Connections
-M.btnAutoAcc.MouseButton1Click:Connect(function()
-    M.autoAcceptProfit = not M.autoAcceptProfit
-    if M.autoAcceptProfit then
-        M.btnAutoAcc.Text = "☑ AUTO-ACCEPT passivo (lucro >= " .. M.AUTO_MIN .. ")"
-        M.btnAutoAcc.TextColor3 = M.C_GREEN
-    else
-        M.btnAutoAcc.Text = "☐ AUTO-ACCEPT passivo (lucro >= " .. M.AUTO_MIN .. ")"
-        M.btnAutoAcc.TextColor3 = M.C_TEXT_DIM
-    end
-end)
+M.btnRichest.MouseButton1Click:Connect(runRichest)
+M.btnPredator.MouseButton1Click:Connect(runPredator)
+M.btnArbitrage.MouseButton1Click:Connect(runArbitrage)
 
-M.btnPredator.MouseButton1Click:Connect(function()
-    M.lblTools.TextColor3 = M.C_TEXT
-    pcall(runPredator)
-end)
-
-M.btnArbitrage.MouseButton1Click:Connect(function()
-    M.lblTools.TextColor3 = M.C_TEXT
-    pcall(runArbitrage)
-end)
-
-M.btnRichest.MouseButton1Click:Connect(function()
-    M.lblTools.TextColor3 = M.C_TEXT
-    pcall(runRichest)
-end)
-
--- TopBar Buttons
-btnPred.MouseButton1Click:Connect(function()
-    setTab(4)
-    task.wait(0.1)
-    pcall(runPredator)
-end)
-btnArb.MouseButton1Click:Connect(function()
-    setTab(1)
-    task.wait(0.1)
-    pcall(runArbitrage)
-end)
-btnMM.MouseButton1Click:Connect(function()
-    setTab(1)
-    task.wait(0.1)
-    pcall(runRichest)
-end)
-btnHot.MouseButton1Click:Connect(function()
-    setTab(1)
-    local inv = getInv()
-    local tot = 0
-    for _, n in ipairs(inv) do tot = tot + getVal(n) end
-    M.lblTools.Text = "🔥 Seu inventário: " .. fmt(tot) .. " (" .. #inv .. " itens)"
-    M.lblTools.TextColor3 = M.C_YELLOW
-end)
-
--- Min / Drag / Insert
+-- MIN / DRAG
 local isMin = false
 btnMin.MouseButton1Click:Connect(function()
     isMin = not isMin
     if isMin then
         M.main.Size = UDim2.new(0, 600, 0, 34)
-        M.page1.Visible = false
-        M.page2.Visible = false
-        M.page3.Visible = false
-        M.page4.Visible = false
+        M.page1.Visible = false; M.page2.Visible = false; M.page3.Visible = false; M.page4.Visible = false
         M.tabBar.Visible = false
         btnMin.Text = "▣"
     else
@@ -1923,170 +1360,51 @@ UIS.InputBegan:Connect(function(i, p)
     if i.KeyCode == Enum.KeyCode.F and isSafe() then genOffer() end
 end)
 
--- MACROS
-local macrosCtrl = {
-    [Enum.KeyCode.One] = "Troco Waves por itens melhores!",
-    [Enum.KeyCode.Two] = "WTT my items for Godlys!",
-    [Enum.KeyCode.Three] = "Alguém tem Chroma? Pago bem!",
-    [Enum.KeyCode.Four] = "Vendendo barato, vem!",
-}
-local macrosFn = {
-    [Enum.KeyCode.F2] = "WTT my items for your Godlys! Fast!",
-    [Enum.KeyCode.F3] = "Buying Chromas! Paying well!",
-    [Enum.KeyCode.F4] = "Selling cheap! Come trade!",
-    [Enum.KeyCode.F5] = "Looking for Traveler's Gun! Paying premium!",
-}
-
-UIS.InputBegan:Connect(function(inp, p)
-    if p then return end
-    local ctrl = inp:IsKeyDown(Enum.KeyCode.LeftControl) or inp:IsKeyDown(Enum.KeyCode.RightControl)
-    local txt
-    if ctrl then
-        txt = macrosCtrl[inp.KeyCode]
-    else
-        txt = macrosFn[inp.KeyCode]
-    end
-    if txt then
-        pcall(function() setclipboard(txt) end)
-        pcall(function()
-            VIM:SendKeyEvent(true, Enum.KeyCode.Slash, false, game)
-            VIM:SendKeyEvent(false, Enum.KeyCode.Slash, false, game)
-        end)
-        M.lblAuto.Text = "📋 Copiado! Ctrl+V + Enter"
-        M.lblAuto.TextColor3 = M.C_GREEN
-    end
-end)
-
--- ============================================================
--- LOOP PRINCIPAL
--- ============================================================
-local wasOpen = false
+-- MAIN LOOP
 task.spawn(function()
-    while M.gui.Parent do
-        task.wait(0.15)
-        updateStats()
-        updPersonal()
-        updFlip()
-
-        if isSafe() then
-            local ok, o, mf, tf = pcall(isOpen)
-            if ok and o and mf and tf then
-                wasOpen = true
-                attachTips(mf, "mine")
-                attachTips(tf, "theirs")
-
-                for _, obj in ipairs(mf:GetDescendants()) do
-                    if obj:IsA("TextLabel") and obj.Visible then
-                        local bn = parseStack(obj.Text)
-                        if getVal(bn) > 0 and not M.currentTradeSeen[bn] then
-                            M.currentTradeSeen[bn] = true
-                            recordPrice(bn, getVal(bn), "mine")
-                        end
+    local wasOpen = false
+    while true do
+        task.wait(0.5)
+        if not M.isRespawning and M.gui and M.gui.Enabled and M.main.Visible then
+            pcall(updateStats)
+        end
+        if not M.isRespawning and M.tradeOpen and M.myFolder and M.myFolder.Parent and M.theirFolder and M.theirFolder.Parent then
+            wasOpen = true
+            pcall(function()
+                local mV = folderFull(M.myFolder)
+                local tV = folderFull(M.theirFolder)
+                if mV ~= M.lastMyVal or tV ~= M.lastTheirVal then
+                    M.lastMyVal = mV; M.lastTheirVal = tV
+                    if M.lblYour then M.lblYour.Text = "SEU: " .. fmt(mV) end
+                    if M.lblTheir then M.lblTheir.Text = "DELES: " .. fmt(tV) end
+                    local diff = tV - mV
+                    if M.lblDiff then
+                        if diff > 0 then M.lblDiff.Text = "Diferença: +" .. fmt(diff); M.lblDiff.TextColor3 = M.C_GREEN
+                        elseif diff < 0 then M.lblDiff.Text = "Diferença: -" .. fmt(math.abs(diff)); M.lblDiff.TextColor3 = M.C_RED_BRIGHT
+                        else M.lblDiff.Text = "Diferença: 0"; M.lblDiff.TextColor3 = M.C_YELLOW end
+                    end
+                    if mV > 0 or tV > 0 then
+                        if M.autoAcceptProfit then pcall(tryAccept, mV, tV) end
+                        pcall(tryReject, mV, tV)
                     end
                 end
-                for _, obj in ipairs(tf:GetDescendants()) do
-                    if obj:IsA("TextLabel") and obj.Visible then
-                        local bn = parseStack(obj.Text)
-                        if getVal(bn) > 0 and not M.currentTradeSeen[bn] then
-                            M.currentTradeSeen[bn] = true
-                            recordPrice(bn, getVal(bn), "theirs")
-                        end
-                    end
-                end
-
-                local mV, mD, mN, mX = folderFull(mf)
-                local tV, tD, tN, tX = folderFull(tf)
-                M.lastMyVal = mV
-                M.lastTheirVal = tV
-                M.lblYour.Text = "SEU: " .. fmt(mV)
-                M.lblTheir.Text = "DELES: " .. fmt(tV)
-                M.lblMaxY.Text = mX > 0 and ("Mais caro: " .. mN) or "Mais caro: —"
-                M.lblMaxT.Text = tX > 0 and ("Mais caro: " .. tN) or "Mais caro: —"
-                M.lblDemY.Text = string.format("Demanda: %.1f/10", mD)
-                M.lblDemT.Text = string.format("Demanda: %.1f/10", tD)
-                M.lblDemY.TextColor3 = demandColor(mD)
-                M.lblDemT.TextColor3 = demandColor(tD)
-
-                local diff = tV - mV
-                local dT = "Diferença: " .. fmt(math.abs(diff))
-                if diff > 0 then
-                    M.lblDiff.Text = dT .. "  (WIN)"
-                    M.lblDiff.TextColor3 = M.C_GREEN
-                    M.lblStatus.Text = "✔ GANHANDO"
-                    M.lblStatus.TextColor3 = M.C_GREEN
-                elseif diff < 0 then
-                    M.lblDiff.Text = dT .. "  (LOSE)"
-                    M.lblDiff.TextColor3 = M.C_RED_BRIGHT
-                    M.lblStatus.Text = "✖ PERDENDO"
-                    M.lblStatus.TextColor3 = M.C_RED_BRIGHT
-                else
-                    M.lblDiff.Text = dT .. "  (FAIR)"
-                    M.lblDiff.TextColor3 = M.C_YELLOW
-                    M.lblStatus.Text = "➖ JUSTA"
-                    M.lblStatus.TextColor3 = M.C_YELLOW
-                end
-
-                if mV > 0 or tV > 0 then
-                    if M.autoAcceptProfit then
-                        pcall(tryAccept, mV, tV)
-                    end
-                    pcall(tryReject, mV, tV)
-                    if mV > 0 and tV > 0 then
-                        local pp = (tV - mV) / mV * 100
-                        if pp >= M.SNIPER_ACCEPT and tick() - M.sniperLastAlertAt >= 3 then
-                            M.sniperLastAlertAt = tick()
-                            playAlert()
-                            M.lastAutoAcceptAt = 0
-                            pcall(tryAccept, mV, tV)
-                        end
-                    end
-                end
-            else
-                if wasOpen then
-                    wasOpen = false
-                    M.currentTradeSeen = {}
-                    hideTip()
-                    resetUI()
-                end
-            end
+            end)
+        elseif wasOpen then
+            wasOpen = false
+            pcall(resetUI)
         end
     end
 end)
 
--- MONITOR DE RESPAWN: mantém a UI viva
-task.spawn(function()
-    while true do
-        task.wait(1)
-        pcall(function()
-            if M.gui and M.gui.Parent ~= PG then
-                M.gui.Parent = PG
-            end
-            if M.ttGui and M.ttGui.Parent ~= PG then
-                M.ttGui.Parent = PG
-            end
-            if M.alertSoundObj then
-                local sGui = M.alertSoundObj.Parent
-                if sGui and sGui.Parent ~= PG then
-                    sGui.Parent = PG
-                end
-            end
-        end)
-    end
-end)
-
--- Save periódico
-task.spawn(function()
-    while M.gui.Parent do
-        task.wait(30)
-        pcall(savePreds)
-    end
-end)
-
--- Init
+-- INIT
 updateStats()
-updateBL()
-refreshAlerts()
-updPersonal()
 setTab(1)
 
-print("[v44] Carregado — UI agora sobrevive ao respawn (ResetOnSpawn=false + monitor)")
+-- ⭐ Escaneia remotes no boot e loga
+task.defer(function()
+    task.wait(2)
+    findAllSendRemotes()
+end)
+
+print("[v51] Carregado — Request ultra-agressivo (Player/Name/UserId)")
+print("[v51] Veja o console (F9) para ver os remotes encontrados")
