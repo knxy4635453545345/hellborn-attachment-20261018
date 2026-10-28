@@ -1,717 +1,2092 @@
+--[[
+    MM2 Trade Helper - v44
+    - FIX: UI não fecha mais ao acabar as partidas (ResetOnSpawn = false + monitor)
+    - Envio de request TOP 5 ricos
+    - Espera de 25 segundos por resposta antes de ir para o próximo
+]]
+
 -- ============================================================
--- MM2 HALLOWEEN FARM + FLING (lobby + round)
--- Speed: 20 | Noclip voando | Fling por teleporte
+-- SERVIÇOS
 -- ============================================================
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local LocalPlayer = Players.LocalPlayer
+local LP = Players.LocalPlayer
+local PG = LP:WaitForChild("PlayerGui")
+local UIS = game:GetService("UserInputService")
+local RS = game:GetService("ReplicatedStorage")
+local VIM = game:GetService("VirtualInputManager")
+local TS = game:GetService("TweenService")
 
--- ================== CONFIG ==================
-local CONFIG = {
-    Speed = 20,
-    MaxCoins = 50,
-    CheckInterval = 1.0,
-    AutoFarmEnabled = false,
-    FlingPower = 1e5,
-    FlingDuration = 0.6,
-    UnderY = 4,
-    NoclipRefresh = 0.1,
+-- ============================================================
+-- LIMPEZA
+-- ============================================================
+for _, child in ipairs(PG:GetChildren()) do
+    if child.Name == "MM2_TradeHelper" or child.Name == "MM2_ItemTooltip" or child.Name == "MM2_AlertSound" then
+        child:Destroy()
+    end
+end
+
+-- ============================================================
+-- TABELA MESTRA
+-- ============================================================
+local G = _G
+G.MM2 = {}
+local M = G.MM2
+
+M.stats = {trades=0, profit=0, wins=0, losses=0}
+M.history = {}
+M.blacklist = {}
+M.presetTexts = {nil, nil, nil}
+M.itemPriceHistory = {}
+M.currentTradeSeen = {}
+M.priceAlerts = {}
+M.personalStats = {
+    best = {profit=0, time="—"},
+    worst = {profit=0, time="—"},
+    profitSum = 0,
+    tradesCount = 0,
+    itemsTraded = {},
+}
+M.flip = {time=tick(), profit=0, count=0}
+M.isGenerating = false
+M.isClearing = false
+M.isSendingRequests = false
+M.autoRejectLowball = false
+M.autoAcceptProfit = true
+M.lowballThreshold = 50
+M.lowballTimer = 0
+M.lastMyVal = 0
+M.lastTheirVal = 0
+M.alertType = "above"
+M.alertPopupFrame = nil
+M.alertSoundObj = nil
+M.sniperLastAlertAt = 0
+M.lastAutoAcceptAt = 0
+M.onlyDuplicates = false
+M.AUTO_MIN = 5
+M.AUTO_CD = 2
+M.SNIPER_ALERT = 20
+M.SNIPER_ACCEPT = 40
+
+M.C_BLACK = Color3.fromRGB(10, 8, 10)
+M.C_DARK = Color3.fromRGB(18, 12, 15)
+M.C_PANEL = Color3.fromRGB(22, 14, 18)
+M.C_RED = Color3.fromRGB(200, 20, 30)
+M.C_RED_BRIGHT = Color3.fromRGB(255, 40, 50)
+M.C_RED_DARK = Color3.fromRGB(120, 10, 20)
+M.C_RED_GLOW = Color3.fromRGB(255, 60, 80)
+M.C_TEXT = Color3.fromRGB(245, 240, 240)
+M.C_TEXT_DIM = Color3.fromRGB(160, 130, 140)
+M.C_GREEN = Color3.fromRGB(50, 220, 100)
+M.C_YELLOW = Color3.fromRGB(255, 200, 100)
+M.C_BLUE = Color3.fromRGB(100, 180, 255)
+
+M.TradeFolder = RS:FindFirstChild("Trade")
+
+-- Função de busca de remote super rigorosa
+local function findRemote(cands)
+    local locs = {M.TradeFolder, RS, RS:FindFirstChild("Remotes"), RS:FindFirstChild("RemoteEvents")}
+    if M.TradeFolder then
+        table.insert(locs, M.TradeFolder:FindFirstChild("Remotes"))
+        table.insert(locs, M.TradeFolder:FindFirstChild("RemoteEvents"))
+        table.insert(locs, M.TradeFolder:FindFirstChild("Events"))
+    end
+    for _, n in ipairs(cands) do
+        for _, loc in ipairs(locs) do
+            if loc then
+                local r = loc:FindFirstChild(n)
+                if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then
+                    return r
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Remote de envio request exclusivo
+local function getSendTradeRemote()
+    local paths = {
+        M.TradeFolder and M.TradeFolder:FindFirstChild("Remotes") and M.TradeFolder.Remotes:FindFirstChild("SendTradeRequest"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("Remotes") and M.TradeFolder.Remotes:FindFirstChild("RequestTrade"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("SendTradeRequest"),
+        M.TradeFolder and M.TradeFolder:FindFirstChild("RequestTrade"),
+        RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild("SendTradeRequest"),
+        RS:FindFirstChild("Remotes") and RS.Remotes:FindFirstChild("RequestTrade"),
+        RS:FindFirstChild("SendTradeRequest"),
+        RS:FindFirstChild("RequestTrade"),
+    }
+    for _, r in ipairs(paths) do
+        if r and (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) then
+            return r
+        end
+    end
+    return findRemote({"SendTradeRequest", "RequestTrade", "TradeRequest", "InviteTrade", "SendRequest", "OfferTrade"})
+end
+
+M.OfferEvt = findRemote({"OfferItem", "AddItem", "AddToOffer", "Offer"})
+M.RemoveEvt = findRemote({"RemoveOffer", "RemoveItem", "RemoveFromOffer", "Unoffer"})
+M.DeclineEvt = findRemote({"DeclineTrade", "Decline", "CancelTrade", "RejectTrade", "Cancel", "Reject"})
+M.AcceptEvt = findRemote({"AcceptTrade", "Accept", "ConfirmTrade", "Confirm", "ReadyTrade", "Ready", "SetReady", "ToggleReady", "ConfirmOffer", "FinalizeTrade", "CompleteTrade"})
+
+-- ============================================================
+-- TABELAS DE VALORES
+-- ============================================================
+M.ITEM_VALUES = {
+    ["Nik's Scythe"] = 999999999, ["Gingerscope"] = 14750, ["Traveler's Axe"] = 8000,
+    ["Celestial"] = 1950, ["Emberbow"] = 1600, ["Emberscythe"] = 1350, ["Vampire's Axe"] = 1325,
+    ["Harvester"] = 250, ["Icepiercer"] = 160, ["Icebreaker"] = 65, ["Batwing"] = 42,
+    ["Elderwood Scythe"] = 38, ["Swirly Axe"] = 38, ["Hallowscythe"] = 30, ["Logchopper"] = 18, ["Icewing"] = 13,
+    ["Traveler's Gun"] = 5200, ["Evergun"] = 3450, ["Evergreen"] = 2700, ["Constellation"] = 2500,
+    ["Vampire's Gun"] = 1900, ["Turkey"] = 1850, ["Alienbeam"] = 1800, ["Raygun"] = 1775,
+    ["Darkshot"] = 1600, ["Darksword"] = 1575, ["Blossom"] = 1160, ["Sakura"] = 1150,
+    ["Sunrise"] = 800, ["Bauble"] = 675, ["Snowcannon"] = 675, ["Sunset"] = 650,
+    ["Soul"] = 645, ["Spirit"] = 635, ["Xenoknife"] = 435, ["Xenoshot"] = 435,
+    ["Rainbow Gun"] = 405, ["Flora"] = 400, ["Rainbow"] = 400, ["Bloom"] = 395,
+    ["Heart Wand"] = 340, ["Blizzard"] = 250, ["Snowstorm"] = 250, ["Ocean"] = 245,
+    ["Flowerwood Gun"] = 240, ["Waves"] = 240, ["Flowerwood"] = 235, ["Snow Dagger"] = 175,
+    ["Icecream"] = 155, ["Treat"] = 155, ["Watergun"] = 155, ["Immortal"] = 150,
+    ["Mortal"] = 150, ["Sweet"] = 150, ["Borealis"] = 145, ["Australis"] = 140,
+    ["Bat"] = 125, ["Embersickle"] = 90, ["Beachy"] = 80, ["Sands"] = 80,
+    ["Pearlshine"] = 80, ["Candy"] = 80, ["Pearl"] = 75, ["Heartblade"] = 65, ["Ornament"] = 65,
+    ["Phantom"] = 35, ["Red Luger"] = 35, ["Spectre"] = 35, ["Candleflame"] = 33,
+    ["Darkbringer"] = 33, ["Elderwood Blade"] = 33, ["Elderwood Revolver"] = 33,
+    ["Iceblaster"] = 33, ["Makeshift"] = 33, ["Lightbringer"] = 32, ["Sugar"] = 32,
+    ["Green Luger"] = 23, ["Amerilaser"] = 22, ["Laser"] = 22, ["Hallowgun"] = 20,
+    ["Nightblade"] = 20, ["Shark"] = 20, ["Icebeam"] = 18, ["Luger"] = 18,
+    ["Plasmabeam"] = 18, ["Swirly Gun"] = 18, ["Battleaxe II"] = 17, ["Blaster"] = 17,
+    ["Ginger Luger"] = 17, ["Pixel"] = 17, ["Gemstone"] = 15, ["Iceflake"] = 15, ["Old Glory"] = 15,
+    ["Plasmablade"] = 15, ["Slasher"] = 15, ["Vampire's Edge"] = 15,
+    ["Cookiecane"] = 13, ["Deathshard"] = 13, ["Eternalcane"] = 13, ["Gingerblade"] = 13,
+    ["Jinglegun"] = 13, ["Lugercane"] = 13, ["Minty"] = 13, ["Nebula"] = 13, ["Virtual"] = 13,
+    ["Battleaxe"] = 12, ["Gingermint"] = 12, ["Swirly Blade"] = 12, ["Chill"] = 10,
+    ["Clockwork"] = 10, ["Fang"] = 10, ["Frostsaber"] = 10, ["Heat"] = 10,
+    ["Spider"] = 10, ["Tides"] = 10, ["Bioblade"] = 8, ["Eternal III"] = 8,
+    ["Eternal IV"] = 8, ["Hallow's Blade"] = 8, ["Hallow's Edge"] = 8, ["Handsaw"] = 8,
+    ["Boneblade"] = 7, ["Eternal"] = 7, ["Eternal II"] = 7, ["Frostbite"] = 7,
+    ["Ghostblade"] = 7, ["Ice Dragon"] = 7, ["Ice Shard"] = 7, ["Prismatic"] = 7,
+    ["Pumpking"] = 7, ["Saw"] = 7, ["Xmas"] = 7, ["Eggblade"] = 5, ["Flames"] = 5,
+    ["Snowflake"] = 5, ["Winter's Edge"] = 5, ["Peppermint"] = 4, ["Cookieblade"] = 3,
+    ["Blue Seer"] = 3, ["Purple Seer"] = 3, ["Red Seer"] = 3, ["Seer"] = 3,
+    ["Orange Seer"] = 2, ["Yellow Seer"] = 2,
+    ["C. Traveler's Gun"] = 140000, ["Chroma Evergun"] = 48000, ["Chroma Evergreen"] = 34000,
+    ["Chroma Bauble"] = 29000, ["C. Constellation"] = 27000, ["C. Vampire's Gun"] = 24500,
+    ["Chroma Alienbeam"] = 24000, ["Chroma Emberscythe"] = 14000, ["Chroma Raygun"] = 12500,
+    ["Chroma Sunrise"] = 8500, ["Chroma Emberbow"] = 8000, ["Chroma Snowcannon"] = 7750,
+    ["Chroma Blizzard"] = 5500, ["Chroma Sunset"] = 5500, ["Chroma Snowstorm"] = 4250,
+    ["Chroma Heart Wand"] = 3500, ["Chroma Snow Dagger"] = 2350, ["Chroma Watergun"] = 2300,
+    ["Chroma Icecream"] = 1850, ["Chroma Ornament"] = 1825, ["Chroma Treat"] = 1775,
+    ["Chroma Sweet"] = 1725, ["Chroma Immortal"] = 1600, ["Chroma Mortal"] = 1600,
+    ["Chroma Embersickle"] = 1500, ["Chroma Sands"] = 1375, ["Chroma Beachy"] = 1325,
+    ["Chroma Darkbringer"] = 65, ["Chroma Lightbringer"] = 60, ["Chroma Luger"] = 50,
+    ["Chroma Candleflame"] = 40, ["Chroma Laser"] = 40, ["C. Elderwood Blade"] = 37,
+    ["Chroma Deathshard"] = 35, ["Chroma Swirly Gun"] = 35, ["Chroma Cookiecane"] = 32,
+    ["Chroma Fang"] = 32, ["Chroma Gemstone"] = 32, ["Chroma Shark"] = 32,
+    ["Chroma Slasher"] = 32, ["Chroma Heat"] = 28, ["Chroma Seer"] = 28,
+    ["Chroma Gingerblade"] = 27, ["Chroma Tides"] = 27, ["Chroma Saw"] = 23, ["Chroma Boneblade"] = 22,
+    ["Vintage Blood"] = 8, ["Vintage Ghost"] = 8, ["Vintage Laser"] = 8, ["Vintage America"] = 7,
+    ["Vintage Prince"] = 6, ["Vintage Shadow"] = 6, ["Vintage Phaser"] = 5, ["Vintage Cowboy"] = 4,
+    ["Vintage Golden"] = 4, ["Vintage Splitter"] = 3,
+    ["Corrupt"] = 350, ["Sharkseeker"] = 150, ["Dartbringer"] = 100,
 }
 
--- ================== ESTADO ==================
-local isRunning = false
-local runID = 0
-local blacklist = {}
-local BLACKLIST_TIME = 15
-local COLLECTING_COIN = false
-local log = {}
-local function dbg(msg)
-    local t = string.format("[%s] %s", os.date("%H:%M:%S"), tostring(msg))
-    table.insert(log, 1, t)
-    if #log > 6 then table.remove(log) end
-    print(t)
+M.ITEM_DEMAND = {
+    ["Nik's Scythe"]=11, ["Gingerscope"]=5, ["Traveler's Axe"]=5, ["Celestial"]=5, ["Emberbow"]=6,
+    ["Emberscythe"]=5, ["Vampire's Axe"]=5, ["Harvester"]=3, ["Icepiercer"]=3, ["Traveler's Gun"]=5,
+    ["Evergun"]=5, ["Evergreen"]=5, ["Constellation"]=5, ["Vampire's Gun"]=5, ["Turkey"]=5,
+    ["Alienbeam"]=5, ["Raygun"]=5, ["Darkshot"]=5, ["Darksword"]=5, ["Blossom"]=5, ["Sakura"]=5,
+    ["Sunrise"]=5, ["Bauble"]=5, ["Snowcannon"]=5, ["Sunset"]=5, ["Soul"]=5, ["Spirit"]=5,
+    ["Xenoknife"]=5, ["Xenoshot"]=5, ["Rainbow Gun"]=5, ["Flora"]=5, ["Rainbow"]=5, ["Bloom"]=5,
+    ["Heart Wand"]=4, ["Blizzard"]=3, ["Snowstorm"]=3, ["Ocean"]=3, ["Flowerwood Gun"]=3,
+    ["Waves"]=3, ["Flowerwood"]=3, ["Snow Dagger"]=3, ["Icecream"]=3, ["Treat"]=3, ["Watergun"]=3,
+    ["Immortal"]=3, ["Mortal"]=3, ["Sweet"]=3, ["Borealis"]=2, ["Australis"]=2, ["Bat"]=2,
+    ["Embersickle"]=2, ["Beachy"]=2, ["Sands"]=2,
+    ["C. Traveler's Gun"]=8, ["Chroma Evergun"]=7, ["Chroma Evergreen"]=7, ["Chroma Bauble"]=7,
+    ["C. Constellation"]=6, ["C. Vampire's Gun"]=6, ["Chroma Alienbeam"]=6, ["Chroma Emberscythe"]=8,
+    ["Chroma Raygun"]=5, ["Chroma Sunrise"]=5, ["Chroma Emberbow"]=7, ["Chroma Snowcannon"]=5,
+    ["Chroma Blizzard"]=5, ["Chroma Sunset"]=5, ["Chroma Snowstorm"]=5, ["Chroma Heart Wand"]=5,
+    ["Chroma Snow Dagger"]=5, ["Chroma Watergun"]=5, ["Chroma Icecream"]=5, ["Chroma Ornament"]=5,
+    ["Chroma Treat"]=5, ["Chroma Sweet"]=5, ["Chroma Immortal"]=5, ["Chroma Mortal"]=5,
+    ["Chroma Embersickle"]=5, ["Chroma Sands"]=5, ["Chroma Beachy"]=5,
+    ["Vintage Blood"]=1, ["Vintage Ghost"]=1, ["Vintage Laser"]=1, ["Vintage America"]=1,
+    ["Vintage Prince"]=1, ["Vintage Shadow"]=1, ["Vintage Phaser"]=1, ["Vintage Cowboy"]=1,
+    ["Vintage Golden"]=1, ["Vintage Splitter"]=1,
+    ["Corrupt"]=3, ["Sharkseeker"]=1, ["Dartbringer"]=1,
+}
+
+-- ============================================================
+-- HELPERS
+-- ============================================================
+local function clean(n)
+    if not n then return "" end
+    n = string.lower(n)
+    n = n:gsub("%b()", ""):gsub("x%d+", ""):gsub("%d+x", ""):gsub("%d+", "")
+    n = n:gsub("['’]", ""):gsub("[^%w%s]", ""):gsub("%s+", " ")
+    return n:match("^%s*(.-)%s*$")
 end
 
--- ================== HELPERS ==================
-local function getHRP()
-    local c = LocalPlayer.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
-local function getHum()
-    local c = LocalPlayer.Character
-    return c and c:FindFirstChildOfClass("Humanoid")
-end
-local function shouldStop(myID)
-    return not CONFIG.AutoFarmEnabled or myID ~= runID
+local function parseStack(t)
+    if not t then return "", 1 end
+    local q = 1
+    local s = t:match("^%s*(.-)%s*$") or t
+    local m, qv = s:match("^(.-)%s*%(?x%s*(%d+)%)?$")
+    if m and m ~= "" and qv then s = m; q = tonumber(qv) end
+    local q2, m2 = s:match("^(%d+)%s*x%s*(.+)$")
+    if q2 and m2 then q = tonumber(q2); s = m2 end
+    return s:match("^%s*(.-)%s*$") or s, q
 end
 
--- ================== NOCLIP ==================
-local function setNoclip(enabled)
-    local char = LocalPlayer.Character
-    if not char then return end
-    for _, part in ipairs(char:GetDescendants()) do
-        if part:IsA("BasePart") then
-            pcall(function() part.CanCollide = not enabled end)
-        end
-    end
-end
-
-local function noclipLoop()
-    task.spawn(function()
-        while true do
-            task.wait(CONFIG.NoclipRefresh)
-            pcall(function()
-                if CONFIG.AutoFarmEnabled and not COLLECTING_COIN then
-                    setNoclip(true)
-                end
-            end)
-        end
-    end)
-end
-
--- ================== CONTAGEM ==================
-local function getCoinCount()
-    pcall(function()
-        local c = LocalPlayer:FindFirstChild("Coins") or LocalPlayer:FindFirstChild("coins")
-        if c and typeof(c) == "ValueBase" then return c.Value end
-        local ls = LocalPlayer:FindFirstChild("leaderstats")
-        if ls then
-            local cc = ls:FindFirstChild("Coins") or ls:FindFirstChild("coins") or ls:FindFirstChild("Candy")
-            if cc then return cc.Value end
-        end
-    end)
-    local bp = LocalPlayer:FindFirstChild("Backpack")
-    if bp then
-        local n = 0
-        for _, i in ipairs(bp:GetChildren()) do
-            if i.Name:lower():find("coin") or i.Name:lower():find("candy") then n = n + 1 end
-        end
-        return n
-    end
+local function getVal(n)
+    local c = clean(n)
+    if c == "" then return 0 end
+    for k, v in pairs(M.ITEM_VALUES) do if clean(k) == c then return v end end
     return 0
 end
-local function isInventoryFull() return getCoinCount() >= CONFIG.MaxCoins end
 
-local function getPos(obj)
-    if not obj or not obj.Parent then return nil end
-    if obj:IsA("BasePart") then return obj.Position end
-    if obj:IsA("Model") then
-        if obj.PrimaryPart then return obj.PrimaryPart.Position end
-        local p = obj:FindFirstChildWhichIsA("BasePart")
-        return p and p.Position or nil
-    end
-    if obj:IsA("Tool") then
-        local h = obj:FindFirstChild("Handle")
-        return h and h.Position or nil
-    end
-    return nil
+local function getDemand(n)
+    local c = clean(n)
+    if c == "" then return 1 end
+    for k, v in pairs(M.ITEM_DEMAND) do if clean(k) == c then return v end end
+    return 1
 end
 
-local function getTouchPart(obj)
-    if not obj then return nil end
-    if obj:IsA("BasePart") then return obj end
-    if obj:IsA("Model") then return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart") end
-    if obj:IsA("Tool") then return obj:FindFirstChild("Handle") end
-    return nil
+local function getExact(n)
+    local c = clean(n)
+    for k in pairs(M.ITEM_VALUES) do if clean(k) == c then return k end end
+    return n
 end
 
-local function isCoinName(name)
-    name = name:lower()
-    return name:find("coin") or name:find("candy") or name:find("treat")
-        or name:find("sweet") or name:find("moeda") or name:find("doce")
+local function fmt(v)
+    if v >= 1e9 then return string.format("%.1fB", v/1e9)
+    elseif v >= 1e6 then return string.format("%.1fM", v/1e6)
+    elseif v >= 1e3 then return string.format("%.1fK", v/1e3)
+    else return tostring(math.floor(v)) end
 end
 
-local function isRealCoinOnMap(obj)
-    if not obj or not obj.Parent then return false end
-    if not (obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Tool")) then return false end
-    if not isCoinName(obj.Name) then return false end
-    local cur = obj.Parent
-    local inWorkspace = false
-    while cur do
-        if cur == workspace then inWorkspace = true; break end
-        if cur:IsA("Player") then return false end
-        if cur:IsA("Backpack") then return false end
-        if cur:IsA("PlayerGui") then return false end
-        if cur:IsA("Model") and cur:FindFirstChildOfClass("Humanoid") then return false end
-        if cur == ReplicatedStorage then return false end
-        if cur == game:GetService("ServerStorage") then return false end
-        if cur == game:GetService("StarterPack") then return false end
-        if cur == game:GetService("Lighting") then return false end
-        cur = cur.Parent
+local function isSafe()
+    if not LP.Character or not LP.Character.Parent then return false end
+    local h = LP.Character:FindFirstChildOfClass("Humanoid")
+    return h and h.Health > 0
+end
+
+local function getInv()
+    local out = {}
+    local ok, d = pcall(function() return require(RS.Modules.ProfileData) end)
+    if ok and d and d.Weapons and d.Weapons.Owned then
+        for k, c in pairs(d.Weapons.Owned) do
+            if c > 0 and getVal(k) > 0 then
+                for _ = 1, c do table.insert(out, k) end
+            end
+        end
     end
-    if not inWorkspace then return false end
-    local pos = getPos(obj)
-    if not pos then return false end
-    if pos.Y < -100 then return false end
-    if pos.Magnitude < 1 then return false end
-    if obj:IsA("BasePart") then
-        if obj.Transparency >= 1 then return false end
-    elseif obj:IsA("Model") then
-        local part = obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
-        if part and part.Transparency >= 1 then return false end
-    elseif obj:IsA("Tool") then
-        local h = obj:FindFirstChild("Handle")
-        if h and h.Transparency >= 1 then return false end
+    return out
+end
+
+local function getTradeGUI()
+    for _, n in ipairs({"TradeGUI","TradeGui","Trade","TradingGUI","TradeMenu","TradeScreen"}) do
+        local g = PG:FindFirstChild(n)
+        if g and (not g:IsA("ScreenGui") or g.Enabled) then return g end
+    end
+    for _, g in ipairs(PG:GetChildren()) do
+        if g:IsA("ScreenGui") and g.Enabled and string.lower(g.Name):find("trade") then return g end
+    end
+end
+
+local function findFolder(root, kws)
+    if not root then return nil end
+    for _, o in ipairs(root:GetDescendants()) do
+        if o:IsA("GuiObject") and o.Visible then
+            local ln = string.lower(o.Name)
+            for _, k in ipairs(kws) do if ln:find(k) then return o end end
+        end
+    end
+end
+
+local function isOpen()
+    if not isSafe() then return false, nil, nil end
+    local t = getTradeGUI()
+    if not t then return false, nil, nil end
+    local my = findFolder(t, {"youroffer","myoffer","useroffer","playeroffer","youritems","myitems","playeritems"})
+    local th = findFolder(t, {"theiroffer","otheroffer","partneroffer","theiritems","otheritems","partneritems"})
+    if not my or not th then return false, nil, nil end
+    return true, my, th
+end
+
+local function visible(o, r)
+    local c = o
+    while c and c ~= r do
+        if c:IsA("GuiObject") and not c.Visible then return false end
+        c = c.Parent
     end
     return true
 end
 
-local function getNearestCoin()
-    local hrp = getHRP()
-    if not hrp then return nil, nil end
-    local nearest, shortest = nil, math.huge
-    local now = tick()
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("Model") or obj:IsA("Tool") then
-            if isCoinName(obj.Name) then
-                local bl = blacklist[obj]
-                if not bl or (now - bl) > BLACKLIST_TIME then
-                    if isRealCoinOnMap(obj) then
-                        local pos = getPos(obj)
-                        if pos then
-                            local d = (pos - hrp.Position).Magnitude
-                            if d < shortest then shortest = d; nearest = obj end
+local function folderStats(f)
+    if not isSafe() or not f or not f.Parent then return 0, 0 end
+    local cnt, tot = 0, 0
+    pcall(function()
+        for _, o in ipairs(f:GetDescendants()) do
+            if o:IsA("GuiObject") and o.Visible and visible(o, f) then
+                local texts = {}
+                if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+                    table.insert(texts, o.Text or "")
+                end
+                table.insert(texts, o.Name or "")
+                for _, t in ipairs(texts) do
+                    if t ~= "" and t ~= "..." and t ~= "???" and t ~= "Empty" and t ~= LP.Name and t ~= "Frame" and t ~= "TextLabel" and t ~= "ImageLabel" then
+                        local bn, q = parseStack(t)
+                        local uv = getVal(bn)
+                        if uv > 0 then cnt = cnt + q; tot = tot + uv*q; break end
+                    end
+                end
+            end
+        end
+    end)
+    return cnt, tot
+end
+
+local function folderFull(f)
+    if not isSafe() or not f or not f.Parent then return 0, 1, "—", 0 end
+    local tv, qty, ds, mn, mv = 0, 0, 0, "—", 0
+    pcall(function()
+        for _, o in ipairs(f:GetDescendants()) do
+            if o:IsA("GuiObject") and o.Visible and visible(o, f) then
+                local texts = {}
+                if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+                    table.insert(texts, o.Text or "")
+                end
+                table.insert(texts, o.Name or "")
+                for _, t in ipairs(texts) do
+                    if t ~= "" and t ~= "..." and t ~= "???" and t ~= "Empty" and t ~= LP.Name then
+                        local bn, q = parseStack(t)
+                        local uv = getVal(bn)
+                        if uv > 0 then
+                            tv = tv + uv*q
+                            ds = ds + getDemand(bn)*q
+                            qty = qty + q
+                            if uv > mv then mv = uv; mn = bn end
+                            break
                         end
                     end
                 end
             end
         end
-    end
-    return nearest, shortest
-end
-
--- ================== DETECTAR LOBBY ==================
-local function isInLobby()
-    for _, n in ipairs({"Lobby", "WaitingRoom", "LobbyMap"}) do
-        if workspace:FindFirstChild(n) then return true end
-    end
-    for _, a in ipairs({"RoundActive", "InRound", "IsRoundActive", "RoundStarted"}) do
-        local v = workspace:GetAttribute(a)
-        if v == nil then v = ReplicatedStorage:GetAttribute(a) end
-        if v ~= nil then return not v end
-    end
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if isCoinName(obj.Name) and isRealCoinOnMap(obj) then
-            return false
-        end
-    end
-    local anyRole = false
-    for _, p in ipairs(Players:GetPlayers()) do
-        local r = p:FindFirstChild("Role")
-        if r and r:IsA("StringValue") and r.Value ~= "" then anyRole = true; break end
-    end
-    return not anyRole
-end
-
--- ================== VOO POR VELOCIDADE (atravessa paredes via noclip) ==================
-local function flyTo(targetPos, speed, myID)
-    local hrp = getHRP()
-    if not hrp then return false end
-
-    local bv = Instance.new("BodyVelocity")
-    bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-    bv.Velocity = Vector3.zero
-    bv.Parent = hrp
-
-    local function cleanup()
-        pcall(function() bv:Destroy() end)
-    end
-
-    while true do
-        task.wait(0.03)
-        if shouldStop(myID) then cleanup(); return false end
-        local cur = getHRP()
-        if not cur or not cur.Parent then cleanup(); return false end
-        local delta = targetPos - cur.Position
-        local dist = delta.Magnitude
-        if dist < 1 then break end
-        bv.Velocity = delta.Unit * math.min(speed, dist * 8)
-    end
-    cleanup()
-    return true
-end
-
--- ================== TELEPORTE (para o fling) ==================
-local function teleportTo(targetPos)
-    local hrp = getHRP()
-    if not hrp then return false end
-    pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-    pcall(function() hrp.AssemblyAngularVelocity = Vector3.zero end)
-    pcall(function() hrp.CFrame = CFrame.new(targetPos) end)
-    return true
-end
-
--- ================== FORÇAR COLETA ==================
-local function forceCollect(obj)
-    local hrp = getHRP()
-    local part = getTouchPart(obj)
-    if not hrp or not part then return end
-
-    pcall(function() part.CanTouch = true end)
-    pcall(function()
-        if sethiddenproperty then sethiddenproperty(part, "CanTouch", true) end
     end)
-
-    if firetouchinterest then
-        pcall(function()
-            firetouchinterest(hrp, part, 0)
-            firetouchinterest(part, hrp, 0)
-        end)
-        pcall(function()
-            firetouchinterest(hrp, part, 1)
-            firetouchinterest(part, hrp, 1)
-        end)
-    end
-
-    if firesignal then
-        pcall(function() firesignal(part.Touched, hrp) end)
-        pcall(function() firesignal(hrp.Touched, part) end)
-    end
-
-    if getconnections then
-        pcall(function()
-            for _, c in ipairs(getconnections(part.Touched)) do
-                pcall(function() c:Fire(hrp) end)
-            end
-        end)
-        pcall(function()
-            for _, c in ipairs(getconnections(hrp.Touched)) do
-                pcall(function() c:Fire(part) end)
-            end
-        end)
-    end
-
-    pcall(function() part.Touched:Fire(hrp) end)
-    pcall(function() hrp.Touched:Fire(part) end)
-
-    local cd = part:FindFirstChildOfClass("ClickDetector") or obj:FindFirstChildOfClass("ClickDetector")
-    if cd and fireclickdetector then pcall(function() fireclickdetector(cd) end) end
-
-    local pp = part:FindFirstChildOfClass("ProximityPrompt") or obj:FindFirstChildOfClass("ProximityPrompt")
-    if pp and fireproximityprompt then pcall(function() fireproximityprompt(pp) end) end
+    return tv, (qty > 0 and ds/qty or 1), mn, mv
 end
 
--- ================== COLETA (noclip p/ paredes, colisão p/ moeda) ==================
-local function collectCoin(coin, myID)
-    local coinPos = getPos(coin)
-    if not coinPos then return false end
+local function demandColor(d)
+    if d >= 6 then return M.C_RED_BRIGHT
+    elseif d >= 4 then return Color3.fromRGB(255, 150, 50)
+    else return M.C_YELLOW end
+end
 
-    -- FASE 1: voar com noclip para baixo da moeda
-    if not flyTo(coinPos - Vector3.new(0, CONFIG.UnderY, 0), CONFIG.Speed, myID) then return false end
-    if shouldStop(myID) then return false end
-    if not coin.Parent then return true end
+local function fire(r)
+    if not r then return false end
+    return pcall(function()
+        if r:IsA("RemoteEvent") then r:FireServer()
+        elseif r:IsA("RemoteFunction") then r:InvokeServer() end
+    end)
+end
 
-    -- FASE 2: REATIVAR COLISÃO (só para essa moeda)
-    COLLECTING_COIN = true
-    task.wait(0.05)
-    setNoclip(false)
-    task.wait(0.05)
-    if shouldStop(myID) then COLLECTING_COIN = false; return false end
-    if not coin.Parent then COLLECTING_COIN = false; return true end
-
-    -- FASE 3: subir devagar com colisão ativa + firetouchinterest
-    local steps = 10
-    for i = 0, steps do
-        if shouldStop(myID) then break end
-        if not coin.Parent then break end
-        local cur = getHRP()
-        if not cur then break end
-        local y = -CONFIG.UnderY + (i / steps) * (CONFIG.UnderY + 1)
-        local target = coinPos + Vector3.new(0, y, 0)
-        pcall(function() cur.CFrame = CFrame.new(target) end)
-        forceCollect(coin)
-        task.wait(0.04)
+local function clickBtn(b)
+    if not b or not b.Parent then return false end
+    local ok = false
+    if type(firesignal) == "function" then
+        pcall(firesignal, b.MouseButton1Click)
+        pcall(firesignal, b.MouseButton1Down)
+        pcall(firesignal, b.MouseButton1Up)
+        ok = true
     end
-
-    -- FASE 4: jitter horizontal
-    if coin.Parent then
-        for i = 1, 8 do
-            if shouldStop(myID) then break end
-            if not coin.Parent then break end
-            local cur = getHRP()
-            if not cur then break end
-            local jitter = Vector3.new(
-                math.random(-6, 6) / 10,
-                math.random(-3, 6) / 10,
-                math.random(-6, 6) / 10
-            )
-            pcall(function() cur.CFrame = CFrame.new(coinPos + jitter) end)
-            forceCollect(coin)
-            task.wait(0.04)
+    if type(getconnections) == "function" then
+        local s, cs = pcall(getconnections, b.MouseButton1Click)
+        if s and cs then
+            for _, c in pairs(cs) do
+                if c.Fire then
+                    pcall(function() c:Fire() end)
+                    ok = true
+                end
+            end
         end
     end
-
-    -- FASE 5: reativar noclip
-    COLLECTING_COIN = false
-    setNoclip(true)
-
-    return not coin.Parent or not isRealCoinOnMap(coin)
+    if b.AbsolutePosition and b.AbsoluteSize then
+        local x = b.AbsolutePosition.X + b.AbsoluteSize.X/2
+        local y = b.AbsolutePosition.Y + b.AbsoluteSize.Y/2
+        pcall(function()
+            VIM:SendMouseMoveEvent(x, y, game); task.wait(0.02)
+            VIM:SendMouseButtonEvent(x, y, 0, true, game, 1); task.wait(0.02)
+            VIM:SendMouseButtonEvent(x, y, 0, false, game, 1)
+        end)
+        ok = true
+    end
+    if type(mouse1click) == "function" then
+        local x = b.AbsolutePosition.X + b.AbsoluteSize.X/2
+        local y = b.AbsolutePosition.Y + b.AbsoluteSize.Y/2
+        if type(mousemoveabs) == "function" then
+            pcall(mousemoveabs, x, y); task.wait(0.02)
+        end
+        pcall(mouse1click); ok = true
+    end
+    return ok
 end
 
--- ================== FLING ==================
-local function flingTarget(targetChar)
-    if not targetChar then return false end
-    local hrp = targetChar:FindFirstChild("HumanoidRootPart")
-    if not hrp then return false end
-    local hum = targetChar:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
-
-    pcall(function() hrp:SetNetworkOwner(LocalPlayer) end)
-    pcall(function() hrp:SetNetworkOwnershipAuto() end)
-
-    local bv = Instance.new("BodyVelocity")
-    bv.Velocity = Vector3.new(CONFIG.FlingPower, CONFIG.FlingPower, CONFIG.FlingPower)
-    bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
-    bv.Parent = hrp
-
-    local bav = Instance.new("BodyAngularVelocity")
-    bav.AngularVelocity = Vector3.new(CONFIG.FlingPower, CONFIG.FlingPower, CONFIG.FlingPower)
-    bav.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    bav.Parent = hrp
-
-    local conn = RunService.Heartbeat:Connect(function()
-        pcall(function()
-            if hrp.Parent then
-                hrp.AssemblyLinearVelocity = Vector3.new(CONFIG.FlingPower, CONFIG.FlingPower, CONFIG.FlingPower)
-                hrp.AssemblyAngularVelocity = Vector3.new(CONFIG.FlingPower, CONFIG.FlingPower, CONFIG.FlingPower)
+local function findBtns(root, kws)
+    local out = {}
+    if not root then return out end
+    for _, o in ipairs(root:GetDescendants()) do
+        if (o:IsA("TextButton") or o:IsA("ImageButton")) and o.Visible then
+            local h = string.lower(o.Name or "")
+            if o:IsA("TextButton") then h = h .. "|" .. string.lower(o.Text or "") end
+            for _, k in ipairs(kws) do
+                if h:find(k) and visible(o, root) then
+                    table.insert(out, o)
+                    break
+                end
             end
+        end
+    end
+    return out
+end
+
+local ACCEPT_KW = {"accept","aceitar","ready","pronto","confirm","confirmar","ok","yes","sim"}
+local DECLINE_KW = {"decline","recusar","cancel","cancelar","reject","rejeitar","no","não","exit","sair"}
+
+local function tryAccept(my, th)
+    if my <= 0 and th <= 0 then return end
+    if th <= 0 then return end
+    if my > 0 and (th - my) < M.AUTO_MIN then return end
+    if tick() - M.lastAutoAcceptAt < M.AUTO_CD then return end
+    M.lastAutoAcceptAt = tick()
+    task.spawn(function()
+        fire(M.AcceptEvt)
+        local g = getTradeGUI()
+        if g then
+            for _, b in ipairs(findBtns(g, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end
+            task.wait(0.6)
+            for _, b in ipairs(findBtns(g, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end
+        end
+    end)
+end
+
+local function tryReject(my, th)
+    if not M.autoRejectLowball then M.lowballTimer = 0; return end
+    if my <= 0 or th <= 0 then M.lowballTimer = 0; return end
+    if th >= my * (M.lowballThreshold/100) then M.lowballTimer = 0; return end
+    if M.lowballTimer == 0 then M.lowballTimer = tick(); return end
+    if tick() - M.lowballTimer < 3 then return end
+    M.lowballTimer = 0
+    fire(M.DeclineEvt)
+    task.spawn(function()
+        local g = getTradeGUI()
+        if not g then return end
+        for _, b in ipairs(findBtns(g, DECLINE_KW)) do clickBtn(b); task.wait(0.1) end
+        task.wait(0.5)
+        if g.Parent then
+            for _, b in ipairs(findBtns(g, {"confirm","confirmar","yes","sim","ok"})) do
+                clickBtn(b); task.wait(0.05)
+            end
+        end
+    end)
+end
+
+-- ============================================================
+-- PREVISÃO
+-- ============================================================
+local function recordPrice(name, v, side)
+    if not name or v <= 0 then return end
+    M.itemPriceHistory[name] = M.itemPriceHistory[name] or {}
+    local h = M.itemPriceHistory[name]
+    local last = h[#h]
+    if last and math.abs(last.t - tick()) < 2 and last.val == v then return end
+    table.insert(h, {val=v, t=tick(), side=side or "trade"})
+    if #h > 50 then table.remove(h, 1) end
+end
+
+local function analyze(name)
+    local h = M.itemPriceHistory[name]
+    if not h or #h < 2 then return {status="no_data"} end
+    local n = #h
+    local cur = h[n].val
+    local sma5, sma10 = nil, nil
+    if n >= 5 then
+        local s = 0
+        for i = n-4, n do s = s + h[i].val end
+        sma5 = s/5
+    end
+    if n >= 10 then
+        local s = 0
+        for i = n-9, n do s = s + h[i].val end
+        sma10 = s/10
+    end
+    local momentum = (sma5 and sma10 and sma10 > 0) and ((sma5-sma10)/sma10*100) or 0
+    local dir, arrow, dirText = "stable", "➖", "ESTÁVEL"
+    if momentum > 2 then dir, arrow, dirText = "up", "📈", "SUBINDO"
+    elseif momentum < -2 then dir, arrow, dirText = "down", "📉", "CAINDO" end
+    local conf = math.min(100, n/8*100)
+    local confLabel = conf >= 80 and "ALTA" or (conf >= 50 and "MÉDIA" or "BAIXA")
+    local rec = "⏸ ESPERAR"
+    if dir == "up" then rec = "🟢 COMPRAR — valor em alta"
+    elseif dir == "down" then rec = "🔴 VENDER — valor em queda" end
+    return {status="ok", current=cur, samples=n, momentum=momentum, arrow=arrow, dirText=dirText, confLabel=confLabel, rec=rec}
+end
+
+local function predText(name)
+    local a = analyze(name)
+    if a.status == "no_data" then return "📊 Sem dados (colete trades)" end
+    return string.format("%s %s\n💹 Momentum: %+.1f%%\n📊 Amostras: %d (%s)\n%s", a.arrow, a.dirText, a.momentum, a.samples, a.confLabel, a.rec)
+end
+
+local function savePreds()
+    if type(writefile) ~= "function" then return end
+    local lines = {}
+    for name, h in pairs(M.itemPriceHistory) do
+        for _, e in ipairs(h) do
+            table.insert(lines, string.format("%s|%d|%d|%s", name, e.val, math.floor(e.t), e.side or "trade"))
+        end
+    end
+    pcall(writefile, "mm2_prices.dat", table.concat(lines, "\n"))
+end
+
+local function loadPreds()
+    if type(readfile) ~= "function" or type(isfile) ~= "function" then return end
+    if not isfile("mm2_prices.dat") then return end
+    local ok, content = pcall(readfile, "mm2_prices.dat")
+    if not ok or not content then return end
+    for line in content:gmatch("[^\n]+") do
+        local name, v, t, s = line:match("^([^|]+)|(%d+)|(%d+)|(.+)$")
+        if name and v and t then
+            name = name:gsub("^%s*(.-)%s*$", "%1")
+            M.itemPriceHistory[name] = M.itemPriceHistory[name] or {}
+            table.insert(M.itemPriceHistory[name], {val=tonumber(v), t=tonumber(t), side=s or "trade"})
+        end
+    end
+end
+
+loadPreds()
+
+local function playAlert()
+    if not M.alertSoundObj then
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "MM2_AlertSound"; sg.ResetOnSpawn = false; sg.Parent = PG
+        local s = Instance.new("Sound")
+        s.SoundId = "rbxassetid://9120386436"; s.Volume = 3
+        s.Parent = sg
+        M.alertSoundObj = s
+    end
+    pcall(function() M.alertSoundObj:Play() end)
+end
+
+-- ============================================================
+-- COMPARADOR
+-- ============================================================
+local function compareItems(a, b)
+    local va = getVal(a); local vb = getVal(b)
+    if va == 0 then return "❌ Item A inválido" end
+    if vb == 0 then return "❌ Item B inválido" end
+    local lines = {}
+    table.insert(lines, "┌──────────┬──────────┐")
+    table.insert(lines, string.format("│ %-8s │ %-8s │", a:sub(1,8), b:sub(1,8)))
+    table.insert(lines, "├──────────┼──────────┤")
+    table.insert(lines, string.format("│ %-8s │ %-8s │", fmt(va), fmt(vb)))
+    table.insert(lines, "└──────────┴──────────┘")
+    local r = math.max(va,vb) / math.max(1, math.min(va,vb))
+    if r > 1.5 then
+        table.insert(lines, va > vb and string.format("🏆 %s vale %.1fx mais", a, r) or string.format("🏆 %s vale %.1fx mais", b, r))
+    else
+        table.insert(lines, "⚖ Valores próximos")
+    end
+    return table.concat(lines, "\n")
+end
+
+-- ============================================================
+-- UI PRINCIPAL (COM FIX DE RESPAWN)
+-- ============================================================
+M.gui = Instance.new("ScreenGui")
+M.gui.Name = "MM2_TradeHelper"
+M.gui.ResetOnSpawn = false -- FIX: UI não fecha ao acabar a partida
+M.gui.DisplayOrder = 999
+M.gui.IgnoreGuiInset = true -- FIX: melhor posicionamento
+M.gui.Parent = PG
+
+M.main = Instance.new("Frame")
+M.main.Size = UDim2.new(0, 600, 0, 500)
+M.main.Position = UDim2.new(0.5, -300, 0, 40)
+M.main.BackgroundColor3 = M.C_BLACK
+M.main.BorderSizePixel = 0
+M.main.Parent = M.gui
+Instance.new("UICorner", M.main).CornerRadius = UDim.new(0, 10)
+local mso = Instance.new("UIStroke", M.main); mso.Color = M.C_RED; mso.Thickness = 1.8
+local msi = Instance.new("UIStroke", M.main); msi.Color = M.C_RED_GLOW; msi.Thickness = 4; msi.Transparency = 0.7
+
+M.topBar = Instance.new("Frame")
+M.topBar.Size = UDim2.new(1, 0, 0, 34)
+M.topBar.BackgroundColor3 = M.C_RED_DARK
+M.topBar.BorderSizePixel = 0
+M.topBar.Parent = M.main
+Instance.new("UICorner", M.topBar).CornerRadius = UDim.new(0, 10)
+local tg = Instance.new("UIGradient", M.topBar)
+tg.Color = ColorSequence.new({ColorSequenceKeypoint.new(0, M.C_RED), ColorSequenceKeypoint.new(1, M.C_RED_DARK)})
+
+local dot = Instance.new("Frame")
+dot.Size = UDim2.new(0, 10, 0, 10)
+dot.Position = UDim2.new(0, 12, 0.5, -5)
+dot.BackgroundColor3 = M.C_RED_BRIGHT
+dot.BorderSizePixel = 0
+dot.Parent = M.topBar
+Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+local ds = Instance.new("UIStroke", dot); ds.Color = M.C_RED_GLOW; ds.Thickness = 2
+task.spawn(function()
+    while dot.Parent do
+        local p = tick() % 1
+        ds.Transparency = 0.2 + math.sin(p * math.pi * 2) * 0.5
+        task.wait(0.05)
+    end
+end)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -180, 1, 0)
+title.Position = UDim2.new(0, 30, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "◤ MM2 TRADE HELPER v44 ◢"
+title.TextColor3 = M.C_TEXT
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Font = Enum.Font.GothamBlack
+title.TextSize = 13
+title.Parent = M.topBar
+
+local btnMin = Instance.new("TextButton")
+btnMin.Size = UDim2.new(0, 24, 0, 24)
+btnMin.Position = UDim2.new(1, -30, 0, 5)
+btnMin.BackgroundColor3 = Color3.fromRGB(30, 5, 10)
+btnMin.Text = "—"
+btnMin.TextColor3 = M.C_RED_BRIGHT
+btnMin.Font = Enum.Font.GothamBlack
+btnMin.TextSize = 14
+btnMin.BorderSizePixel = 0
+btnMin.Parent = M.topBar
+Instance.new("UICorner", btnMin).CornerRadius = UDim.new(0, 5)
+
+local btnHot = Instance.new("TextButton")
+btnHot.Size = UDim2.new(0, 24, 0, 24)
+btnHot.Position = UDim2.new(1, -60, 0, 5)
+btnHot.BackgroundColor3 = Color3.fromRGB(80, 60, 20)
+btnHot.Text = "🔥"
+btnHot.TextColor3 = M.C_YELLOW
+btnHot.Font = Enum.Font.GothamBlack
+btnHot.TextSize = 14
+btnHot.BorderSizePixel = 0
+btnHot.Parent = M.topBar
+Instance.new("UICorner", btnHot).CornerRadius = UDim.new(0, 5)
+
+local btnArb = Instance.new("TextButton")
+btnArb.Size = UDim2.new(0, 24, 0, 24)
+btnArb.Position = UDim2.new(1, -90, 0, 5)
+btnArb.BackgroundColor3 = Color3.fromRGB(20, 60, 40)
+btnArb.Text = "🔮"
+btnArb.TextColor3 = Color3.fromRGB(100, 255, 180)
+btnArb.Font = Enum.Font.GothamBlack
+btnArb.TextSize = 14
+btnArb.BorderSizePixel = 0
+btnArb.Parent = M.topBar
+Instance.new("UICorner", btnArb).CornerRadius = UDim.new(0, 5)
+
+local btnMM = Instance.new("TextButton")
+btnMM.Size = UDim2.new(0, 24, 0, 24)
+btnMM.Position = UDim2.new(1, -120, 0, 5)
+btnMM.BackgroundColor3 = Color3.fromRGB(60, 60, 20)
+btnMM.Text = "🤖"
+btnMM.TextColor3 = M.C_YELLOW
+btnMM.Font = Enum.Font.GothamBlack
+btnMM.TextSize = 14
+btnMM.BorderSizePixel = 0
+btnMM.Parent = M.topBar
+Instance.new("UICorner", btnMM).CornerRadius = UDim.new(0, 5)
+
+local btnPred = Instance.new("TextButton")
+btnPred.Size = UDim2.new(0, 24, 0, 24)
+btnPred.Position = UDim2.new(1, -150, 0, 5)
+btnPred.BackgroundColor3 = Color3.fromRGB(80, 20, 20)
+btnPred.Text = "🦁"
+btnPred.TextColor3 = M.C_RED_BRIGHT
+btnPred.Font = Enum.Font.GothamBlack
+btnPred.TextSize = 14
+btnPred.BorderSizePixel = 0
+btnPred.Parent = M.topBar
+Instance.new("UICorner", btnPred).CornerRadius = UDim.new(0, 5)
+
+-- TABS
+M.tabBar = Instance.new("Frame")
+M.tabBar.Size = UDim2.new(1, 0, 0, 32)
+M.tabBar.Position = UDim2.new(0, 0, 0, 34)
+M.tabBar.BackgroundColor3 = M.C_DARK
+M.tabBar.BorderSizePixel = 0
+M.tabBar.Parent = M.main
+
+local function mkTab(pos, w, t, active)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(w, 0, 1, 0)
+    b.Position = UDim2.new(pos, 0, 0, 0)
+    b.BackgroundColor3 = active and M.C_RED_DARK or M.C_DARK
+    b.Text = t
+    b.TextColor3 = active and M.C_TEXT or M.C_TEXT_DIM
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 11
+    b.BorderSizePixel = 0
+    b.Parent = M.tabBar
+    return b
+end
+
+M.btnTab1 = mkTab(0, 0.25, "◉ CALC", true)
+M.btnTab2 = mkTab(0.25, 0.25, "◉ GERADOR", false)
+M.btnTab3 = mkTab(0.50, 0.25, "◉ ANÁLISE", false)
+M.btnTab4 = mkTab(0.75, 0.25, "◉ TOOLS", false)
+
+M.page1 = Instance.new("Frame")
+M.page1.Size = UDim2.new(1, 0, 1, -66)
+M.page1.Position = UDim2.new(0, 0, 0, 66)
+M.page1.BackgroundTransparency = 1
+M.page1.Parent = M.main
+
+M.page2 = Instance.new("Frame")
+M.page2.Size = UDim2.new(1, 0, 1, -66)
+M.page2.Position = UDim2.new(0, 0, 0, 66)
+M.page2.BackgroundTransparency = 1
+M.page2.Visible = false
+M.page2.Parent = M.main
+
+M.page3 = Instance.new("Frame")
+M.page3.Size = UDim2.new(1, 0, 1, -66)
+M.page3.Position = UDim2.new(0, 0, 0, 66)
+M.page3.BackgroundTransparency = 1
+M.page3.Visible = false
+M.page3.Parent = M.main
+
+M.page4 = Instance.new("Frame")
+M.page4.Size = UDim2.new(1, 0, 1, -66)
+M.page4.Position = UDim2.new(0, 0, 0, 66)
+M.page4.BackgroundTransparency = 1
+M.page4.Visible = false
+M.page4.Parent = M.main
+
+local function mkLbl(parent, pos, size, txt, color, font, ts, align)
+    local l = Instance.new("TextLabel")
+    l.Size = size; l.Position = pos; l.BackgroundTransparency = 1
+    l.Text = txt or ""; l.TextColor3 = color or M.C_TEXT
+    l.Font = font or Enum.Font.GothamBold; l.TextSize = ts or 12
+    l.TextXAlignment = align or Enum.TextXAlignment.Left
+    l.Parent = parent
+    return l
+end
+
+local function mkBtn(parent, pos, size, txt, bg, stroke)
+    local b = Instance.new("TextButton")
+    b.Size = size; b.Position = pos
+    b.BackgroundColor3 = bg
+    b.Text = txt; b.TextColor3 = M.C_TEXT
+    b.Font = Enum.Font.GothamBold; b.TextSize = 12
+    b.BorderSizePixel = 0; b.Parent = parent
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    local s = Instance.new("UIStroke", b)
+    s.Color = stroke or M.C_RED; s.Thickness = 1.2
+    return b
+end
+
+local function setTab(idx)
+    local tabs = {M.btnTab1, M.btnTab2, M.btnTab3, M.btnTab4}
+    local pages = {M.page1, M.page2, M.page3, M.page4}
+    for i = 1, 4 do
+        tabs[i].BackgroundColor3 = (i == idx) and M.C_RED_DARK or M.C_DARK
+        tabs[i].TextColor3 = (i == idx) and M.C_TEXT or M.C_TEXT_DIM
+        pages[i].Visible = (i == idx)
+    end
+end
+
+M.btnTab1.MouseButton1Click:Connect(function() setTab(1) end)
+M.btnTab2.MouseButton1Click:Connect(function() setTab(2) end)
+M.btnTab3.MouseButton1Click:Connect(function() setTab(3) end)
+M.btnTab4.MouseButton1Click:Connect(function() setTab(4) end)
+
+-- ============================================================
+-- PAGE 1 (CALC - Status, Gerador, Configs, Arbitrage, Request)
+-- ============================================================
+mkLbl(M.page1, UDim2.new(0,15,0,8), UDim2.new(0,280,0,18), "📊 STATUS DA TRADE", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 11)
+M.lblYour = mkLbl(M.page1, UDim2.new(0,15,0,32), UDim2.new(0,280,0,22), "SEU: 0", M.C_TEXT, Enum.Font.GothamBold, 14)
+M.lblTheir = mkLbl(M.page1, UDim2.new(0,15,0,58), UDim2.new(0,280,0,22), "DELES: 0", M.C_RED_BRIGHT, Enum.Font.GothamBold, 14)
+M.lblMaxY = mkLbl(M.page1, UDim2.new(0,15,0,86), UDim2.new(0,280,0,18), "Mais caro: —", M.C_TEXT_DIM, Enum.Font.Gotham, 11)
+M.lblMaxT = mkLbl(M.page1, UDim2.new(0,15,0,106), UDim2.new(0,280,0,18), "Mais caro: —", M.C_TEXT_DIM, Enum.Font.Gotham, 11)
+M.lblDemY = mkLbl(M.page1, UDim2.new(0,15,0,128), UDim2.new(0,280,0,18), "Demanda: 1/10", M.C_TEXT_DIM, Enum.Font.Gotham, 11)
+M.lblDemT = mkLbl(M.page1, UDim2.new(0,15,0,148), UDim2.new(0,280,0,18), "Demanda: 1/10", M.C_TEXT_DIM, Enum.Font.Gotham, 11)
+M.lblDiff = mkLbl(M.page1, UDim2.new(0,15,0,178), UDim2.new(0,280,0,30), "Diferença: 0", M.C_TEXT, Enum.Font.GothamBlack, 16, Enum.TextXAlignment.Center)
+M.lblStatus = mkLbl(M.page1, UDim2.new(0,15,0,212), UDim2.new(0,280,0,24), "Aguardando trade...", M.C_TEXT_DIM, Enum.Font.GothamBold, 12, Enum.TextXAlignment.Center)
+
+M.btnGen = mkBtn(M.page1, UDim2.new(0,15,0,240), UDim2.new(0,135,0,28), "⚔ GERAR OFERTA", Color3.fromRGB(30,100,40))
+M.btnClr = mkBtn(M.page1, UDim2.new(0,160,0,240), UDim2.new(0,135,0,28), "✖ LIMPAR", Color3.fromRGB(100,20,25))
+M.btnTA = mkBtn(M.page1, UDim2.new(0,15,0,274), UDim2.new(0,135,0,28), "✅ ACCEPT", Color3.fromRGB(30,80,40), M.C_GREEN)
+M.btnTR = mkBtn(M.page1, UDim2.new(0,160,0,274), UDim2.new(0,135,0,28), "❌ REJECT", Color3.fromRGB(80,30,30), M.C_RED_BRIGHT)
+
+M.btnAR = Instance.new("TextButton")
+M.btnAR.Size = UDim2.new(0,280,0,24)
+M.btnAR.Position = UDim2.new(0,15,0,308)
+M.btnAR.BackgroundColor3 = M.C_PANEL
+M.btnAR.Text = "☐ Rejeitar Lowball (< 50%)"
+M.btnAR.TextColor3 = M.C_TEXT_DIM
+M.btnAR.Font = Enum.Font.GothamBold
+M.btnAR.TextSize = 11
+M.btnAR.TextXAlignment = Enum.TextXAlignment.Left
+M.btnAR.BorderSizePixel = 0
+M.btnAR.Parent = M.page1
+Instance.new("UICorner", M.btnAR).CornerRadius = UDim.new(0, 6)
+
+M.btnDup = Instance.new("TextButton")
+M.btnDup.Size = UDim2.new(0,280,0,24)
+M.btnDup.Position = UDim2.new(0,15,0,336)
+M.btnDup.BackgroundColor3 = M.C_PANEL
+M.btnDup.Text = "☐ Só duplicados (2+)"
+M.btnDup.TextColor3 = M.C_TEXT_DIM
+M.btnDup.Font = Enum.Font.GothamBold
+M.btnDup.TextSize = 11
+M.btnDup.TextXAlignment = Enum.TextXAlignment.Left
+M.btnDup.BorderSizePixel = 0
+M.btnDup.Parent = M.page1
+Instance.new("UICorner", M.btnDup).CornerRadius = UDim.new(0, 6)
+
+-- Coluna Direita
+mkLbl(M.page1, UDim2.new(0,305,0,8), UDim2.new(0,280,0,18), "🛠 FERRAMENTAS", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 11)
+
+M.btnArbitrage = mkBtn(M.page1, UDim2.new(0,305,0,32), UDim2.new(0,280,0,32), "🔮 ARBITRAGE — Analisar trade", Color3.fromRGB(20,60,40), Color3.fromRGB(100,255,180))
+M.btnRichest = mkBtn(M.page1, UDim2.new(0,305,0,72), UDim2.new(0,280,0,32), "💎 ENVIAR REQUEST — Top 5 Ricos", Color3.fromRGB(60,50,10), M.C_YELLOW)
+
+M.lblTools = mkLbl(M.page1, UDim2.new(0,305,0,116), UDim2.new(0,280,0,80), "🛠 Selecione uma ferramenta.", M.C_TEXT, Enum.Font.Code, 11)
+M.lblTools.BackgroundColor3 = M.C_BLACK
+M.lblTools.TextWrapped = true
+M.lblTools.TextYAlignment = Enum.TextYAlignment.Top
+M.lblTools.TextXAlignment = Enum.TextXAlignment.Left
+Instance.new("UICorner", M.lblTools).CornerRadius = UDim.new(0, 6)
+
+mkLbl(M.page1, UDim2.new(0,305,0,210), UDim2.new(0,280,0,16), "🔍 CALCULADORA REVERSA", M.C_BLUE, Enum.Font.GothamBlack, 11)
+
+M.inTarget = Instance.new("TextBox")
+M.inTarget.Size = UDim2.new(0,180,0,26)
+M.inTarget.Position = UDim2.new(0,305,0,232)
+M.inTarget.BackgroundColor3 = M.C_BLACK
+M.inTarget.TextColor3 = M.C_TEXT
+M.inTarget.Font = Enum.Font.Gotham
+M.inTarget.TextSize = 11
+M.inTarget.PlaceholderText = "Ex: 5000"
+M.inTarget.PlaceholderColor3 = M.C_TEXT_DIM
+M.inTarget.Text = ""
+M.inTarget.BorderSizePixel = 0
+M.inTarget.Parent = M.page1
+Instance.new("UICorner", M.inTarget).CornerRadius = UDim.new(0, 6)
+
+M.btnRev = mkBtn(M.page1, UDim2.new(0,490,0,232), UDim2.new(0,95,0,26), "🔍 Buscar", Color3.fromRGB(20,60,100), M.C_BLUE)
+
+-- ============================================================
+-- PAGE 2 (GERADOR - Stats, NetWorth, Diag, BL, Presets)
+-- ============================================================
+mkLbl(M.page2, UDim2.new(0,15,0,8), UDim2.new(0,280,0,18), "📈 ESTATÍSTICAS", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 11)
+
+M.btnNW = mkBtn(M.page2, UDim2.new(0,15,0,32), UDim2.new(0,280,0,30), "◈ CALCULAR NET WORTH", M.C_RED_DARK)
+
+M.lblStats = mkLbl(M.page2, UDim2.new(0,15,0,70), UDim2.new(0,280,0,50), "📊 Sessão: 0 trades", M.C_GREEN, Enum.Font.GothamBold, 12, Enum.TextXAlignment.Center)
+M.lblStats.BackgroundColor3 = M.C_PANEL
+M.lblStats.TextWrapped = true
+Instance.new("UICorner", M.lblStats).CornerRadius = UDim.new(0, 6)
+
+M.lblDiag = mkLbl(M.page2, UDim2.new(0,15,0,130), UDim2.new(0,280,0,90), "🔎 DIAGNÓSTICO\nAguardando trade...", M.C_YELLOW, Enum.Font.Code, 10)
+M.lblDiag.BackgroundColor3 = M.C_BLACK
+M.lblDiag.TextYAlignment = Enum.TextYAlignment.Top
+M.lblDiag.TextWrapped = true
+Instance.new("UICorner", M.lblDiag).CornerRadius = UDim.new(0, 6)
+
+local lblHints = mkLbl(M.page2, UDim2.new(0,15,0,230), UDim2.new(0,280,0,120), "💡 ATALHOS\n[F] Gerar | [Insert] Toggle\n[Ctrl+1..4] Macros | [F2-F5] Templates\n\n💡 Passe o mouse nos itens\n💡 Motor ágil 60 FPS", M.C_TEXT_DIM, Enum.Font.Gotham, 10)
+lblHints.BackgroundColor3 = M.C_PANEL
+lblHints.TextWrapped = true
+Instance.new("UICorner", lblHints).CornerRadius = UDim.new(0, 6)
+
+M.lblAuto = mkLbl(M.page2, UDim2.new(0,15,0,360), UDim2.new(0,280,0,60), "Status: Aguardando...", M.C_TEXT_DIM, Enum.Font.Gotham, 11, Enum.TextXAlignment.Center)
+M.lblAuto.TextWrapped = true
+M.lblAuto.BackgroundColor3 = M.C_BLACK
+Instance.new("UICorner", M.lblAuto).CornerRadius = UDim.new(0, 6)
+
+mkLbl(M.page2, UDim2.new(0,305,0,8), UDim2.new(0,280,0,18), "🚫 BLACKLIST", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 11)
+
+M.inBL = Instance.new("TextBox")
+M.inBL.Size = UDim2.new(0,200,0,26)
+M.inBL.Position = UDim2.new(0,305,0,30)
+M.inBL.BackgroundColor3 = M.C_BLACK
+M.inBL.TextColor3 = M.C_TEXT
+M.inBL.Font = Enum.Font.Gotham
+M.inBL.TextSize = 11
+M.inBL.PlaceholderText = "Item..."
+M.inBL.PlaceholderColor3 = M.C_TEXT_DIM
+M.inBL.Text = ""
+M.inBL.BorderSizePixel = 0
+M.inBL.Parent = M.page2
+Instance.new("UICorner", M.inBL).CornerRadius = UDim.new(0, 6)
+
+M.btnAddBL = Instance.new("TextButton")
+M.btnAddBL.Size = UDim2.new(0,70,0,26)
+M.btnAddBL.Position = UDim2.new(0,515,0,30)
+M.btnAddBL.BackgroundColor3 = M.C_RED
+M.btnAddBL.Text = "+ BLOCK"
+M.btnAddBL.TextColor3 = M.C_TEXT
+M.btnAddBL.Font = Enum.Font.GothamBlack
+M.btnAddBL.TextSize = 11
+M.btnAddBL.BorderSizePixel = 0
+M.btnAddBL.Parent = M.page2
+Instance.new("UICorner", M.btnAddBL).CornerRadius = UDim.new(0, 6)
+
+M.lblBL = mkLbl(M.page2, UDim2.new(0,305,0,62), UDim2.new(0,280,0,22), "🚫 Blacklist vazia", M.C_RED_BRIGHT, Enum.Font.Gotham, 10)
+M.lblBL.BackgroundColor3 = M.C_BLACK
+M.lblBL.TextWrapped = true
+Instance.new("UICorner", M.lblBL).CornerRadius = UDim.new(0, 6)
+
+mkLbl(M.page2, UDim2.new(0,305,0,92), UDim2.new(0,280,0,18), "💾 PRESETS", M.C_YELLOW, Enum.Font.GothamBold, 10)
+
+M.pInputs = {}; M.pSaves = {}; M.pLoads = {}
+for i = 1, 3 do
+    local y = 114 + (i-1)*30
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0,180,0,26)
+    box.Position = UDim2.new(0,305,0,y)
+    box.BackgroundColor3 = M.C_BLACK
+    box.TextColor3 = M.C_TEXT
+    box.Font = Enum.Font.Gotham
+    box.TextSize = 11
+    box.PlaceholderText = "Slot " .. i
+    box.PlaceholderColor3 = M.C_TEXT_DIM
+    box.Text = ""
+    box.BorderSizePixel = 0
+    box.ClearTextOnFocus = false
+    box.Parent = M.page2
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+    M.pInputs[i] = box
+
+    local sv = Instance.new("TextButton")
+    sv.Size = UDim2.new(0,40,0,26)
+    sv.Position = UDim2.new(0,490,0,y)
+    sv.BackgroundColor3 = M.C_RED_DARK
+    sv.Text = "💾"
+    sv.TextColor3 = M.C_TEXT
+    sv.Font = Enum.Font.GothamBlack
+    sv.TextSize = 14
+    sv.BorderSizePixel = 0
+    sv.Parent = M.page2
+    Instance.new("UICorner", sv).CornerRadius = UDim.new(0, 6)
+    M.pSaves[i] = sv
+
+    local ld = Instance.new("TextButton")
+    ld.Size = UDim2.new(0,40,0,26)
+    ld.Position = UDim2.new(0,535,0,y)
+    ld.BackgroundColor3 = Color3.fromRGB(50,50,50)
+    ld.Text = "▶"
+    ld.TextColor3 = M.C_TEXT_DIM
+    ld.Font = Enum.Font.GothamBlack
+    ld.TextSize = 14
+    ld.BorderSizePixel = 0
+    ld.Parent = M.page2
+    Instance.new("UICorner", ld).CornerRadius = UDim.new(0, 6)
+    M.pLoads[i] = ld
+end
+
+-- ============================================================
+-- PAGE 3 (ANÁLISE)
+-- ============================================================
+mkLbl(M.page3, UDim2.new(0,15,0,8), UDim2.new(0,280,0,18), "🔍 COMPARADOR", M.C_BLUE, Enum.Font.GothamBlack, 11)
+
+M.inA = Instance.new("TextBox")
+M.inA.Size = UDim2.new(0,130,0,26); M.inA.Position = UDim2.new(0,15,0,32)
+M.inA.BackgroundColor3 = M.C_BLACK; M.inA.TextColor3 = M.C_TEXT
+M.inA.Font = Enum.Font.Gotham; M.inA.TextSize = 11
+M.inA.PlaceholderText = "Item A"; M.inA.PlaceholderColor3 = M.C_TEXT_DIM
+M.inA.Text = ""; M.inA.BorderSizePixel = 0; M.inA.ClearTextOnFocus = false
+M.inA.Parent = M.page3
+Instance.new("UICorner", M.inA).CornerRadius = UDim.new(0, 6)
+
+M.inB = Instance.new("TextBox")
+M.inB.Size = UDim2.new(0,130,0,26); M.inB.Position = UDim2.new(0,155,0,32)
+M.inB.BackgroundColor3 = M.C_BLACK; M.inB.TextColor3 = M.C_TEXT
+M.inB.Font = Enum.Font.Gotham; M.inB.TextSize = 11
+M.inB.PlaceholderText = "Item B"; M.inB.PlaceholderColor3 = M.C_TEXT_DIM
+M.inB.Text = ""; M.inB.BorderSizePixel = 0; M.inB.ClearTextOnFocus = false
+M.inB.Parent = M.page3
+Instance.new("UICorner", M.inB).CornerRadius = UDim.new(0, 6)
+
+M.btnCmp = mkBtn(M.page3, UDim2.new(0,15,0,62), UDim2.new(0,270,0,26), "⚖ COMPARAR", Color3.fromRGB(20,60,100), M.C_BLUE)
+M.lblCmp = mkLbl(M.page3, UDim2.new(0,15,0,95), UDim2.new(0,280,0,100), "Digite 2 itens.", M.C_TEXT_DIM, Enum.Font.Code, 10)
+M.lblCmp.BackgroundColor3 = M.C_BLACK
+M.lblCmp.TextWrapped = true
+M.lblCmp.TextYAlignment = Enum.TextYAlignment.Top
+Instance.new("UICorner", M.lblCmp).CornerRadius = UDim.new(0, 6)
+
+mkLbl(M.page3, UDim2.new(0,15,0,202), UDim2.new(0,280,0,18), "📊 ESTATÍSTICAS", M.C_YELLOW, Enum.Font.GothamBlack, 11)
+
+M.lblPersonal = mkLbl(M.page3, UDim2.new(0,15,0,225), UDim2.new(0,280,0,100), "📊 Sem trades", M.C_YELLOW, Enum.Font.Gotham, 10)
+M.lblPersonal.BackgroundColor3 = M.C_BLACK
+M.lblPersonal.TextWrapped = true
+M.lblPersonal.TextYAlignment = Enum.TextYAlignment.Top
+Instance.new("UICorner", M.lblPersonal).CornerRadius = UDim.new(0, 6)
+
+mkLbl(M.page3, UDim2.new(0,15,0,332), UDim2.new(0,280,0,18), "📈 FLIP PREDICTOR", M.C_GREEN, Enum.Font.GothamBlack, 11)
+
+M.lblFlip = mkLbl(M.page3, UDim2.new(0,15,0,355), UDim2.new(0,280,0,90), "⏳ Aguardando...", M.C_GREEN, Enum.Font.GothamBold, 10)
+M.lblFlip.BackgroundColor3 = M.C_BLACK
+M.lblFlip.TextWrapped = true
+M.lblFlip.TextYAlignment = Enum.TextYAlignment.Top
+Instance.new("UICorner", M.lblFlip).CornerRadius = UDim.new(0, 6)
+
+mkLbl(M.page3, UDim2.new(0,305,0,8), UDim2.new(0,280,0,18), "🔔 ALERTAS", M.C_GREEN, Enum.Font.GothamBlack, 11)
+
+M.inAItem = Instance.new("TextBox")
+M.inAItem.Size = UDim2.new(0,280,0,26); M.inAItem.Position = UDim2.new(0,305,0,32)
+M.inAItem.BackgroundColor3 = M.C_BLACK; M.inAItem.TextColor3 = M.C_TEXT
+M.inAItem.Font = Enum.Font.Gotham; M.inAItem.TextSize = 11
+M.inAItem.PlaceholderText = "Item..."; M.inAItem.PlaceholderColor3 = M.C_TEXT_DIM
+M.inAItem.Text = ""; M.inAItem.BorderSizePixel = 0; M.inAItem.ClearTextOnFocus = false
+M.inAItem.Parent = M.page3
+Instance.new("UICorner", M.inAItem).CornerRadius = UDim.new(0, 6)
+
+M.btnAType = Instance.new("TextButton")
+M.btnAType.Size = UDim2.new(0,90,0,26); M.btnAType.Position = UDim2.new(0,305,0,64)
+M.btnAType.BackgroundColor3 = Color3.fromRGB(20,60,40); M.btnAType.Text = "acima ▴"
+M.btnAType.TextColor3 = M.C_GREEN; M.btnAType.Font = Enum.Font.GothamBold
+M.btnAType.TextSize = 11; M.btnAType.BorderSizePixel = 0
+M.btnAType.Parent = M.page3
+Instance.new("UICorner", M.btnAType).CornerRadius = UDim.new(0, 6)
+
+M.inAVal = Instance.new("TextBox")
+M.inAVal.Size = UDim2.new(0,90,0,26); M.inAVal.Position = UDim2.new(0,400,0,64)
+M.inAVal.BackgroundColor3 = M.C_BLACK; M.inAVal.TextColor3 = M.C_TEXT
+M.inAVal.Font = Enum.Font.Gotham; M.inAVal.TextSize = 11
+M.inAVal.PlaceholderText = "Valor"; M.inAVal.PlaceholderColor3 = M.C_TEXT_DIM
+M.inAVal.Text = ""; M.inAVal.BorderSizePixel = 0
+M.inAVal.Parent = M.page3
+Instance.new("UICorner", M.inAVal).CornerRadius = UDim.new(0, 6)
+
+M.btnAddAlert = mkBtn(M.page3, UDim2.new(0,495,0,64), UDim2.new(0,90,0,26), "➕ ADD", Color3.fromRGB(20,60,40), M.C_GREEN)
+
+M.alertList = Instance.new("ScrollingFrame")
+M.alertList.Size = UDim2.new(0,280,0,300); M.alertList.Position = UDim2.new(0,305,0,100)
+M.alertList.BackgroundColor3 = M.C_BLACK; M.alertList.BorderSizePixel = 0
+M.alertList.ScrollBarThickness = 6; M.alertList.ScrollBarImageColor3 = M.C_GREEN
+M.alertList.CanvasSize = UDim2.new(0,0,0,0); M.alertList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+M.alertList.Parent = M.page3
+Instance.new("UICorner", M.alertList).CornerRadius = UDim.new(0, 6)
+local alLay = Instance.new("UIListLayout", M.alertList)
+alLay.Padding = UDim.new(0, 4)
+alLay.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- ============================================================
+-- PAGE 4 (TOOLS - Auto accept, Predator)
+-- ============================================================
+mkLbl(M.page4, UDim2.new(0,15,0,8), UDim2.new(0,570,0,20), "🛠 FERRAMENTAS AVANÇADAS", M.C_RED_BRIGHT, Enum.Font.GothamBlack, 13, Enum.TextXAlignment.Center)
+
+M.btnAutoAcc = Instance.new("TextButton")
+M.btnAutoAcc.Size = UDim2.new(0,570,0,32)
+M.btnAutoAcc.Position = UDim2.new(0,15,0,36)
+M.btnAutoAcc.BackgroundColor3 = M.C_PANEL
+M.btnAutoAcc.Text = "☑ AUTO-ACCEPT passivo (lucro >= " .. M.AUTO_MIN .. ")"
+M.btnAutoAcc.TextColor3 = M.C_GREEN
+M.btnAutoAcc.Font = Enum.Font.GothamBold
+M.btnAutoAcc.TextSize = 11
+M.btnAutoAcc.TextXAlignment = Enum.TextXAlignment.Left
+M.btnAutoAcc.BorderSizePixel = 0
+M.btnAutoAcc.Parent = M.page4
+Instance.new("UICorner", M.btnAutoAcc).CornerRadius = UDim.new(0, 6)
+
+M.btnPredator = mkBtn(M.page4, UDim2.new(0,15,0,80), UDim2.new(0,570,0,44), "🦁 PREDATOR — Caçar contas novas", Color3.fromRGB(80,20,20), M.C_RED_BRIGHT)
+mkLbl(M.page4, UDim2.new(0,15,0,128), UDim2.new(0,570,0,16), "Envia requests para contas <= 30 dias (geralmente alts).", M.C_TEXT_DIM, Enum.Font.Gotham, 10, Enum.TextXAlignment.Center)
+
+-- ============================================================
+-- TOOLTIP (TAMBÉM COM FIX)
+-- ============================================================
+M.ttGui = Instance.new("ScreenGui")
+M.ttGui.Name = "MM2_ItemTooltip"
+M.ttGui.ResetOnSpawn = false
+M.ttGui.DisplayOrder = 1000
+M.ttGui.Parent = PG
+
+M.ttFrame = Instance.new("Frame")
+M.ttFrame.Size = UDim2.new(0, 290, 0, 170)
+M.ttFrame.BackgroundColor3 = M.C_DARK
+M.ttFrame.BorderSizePixel = 0
+M.ttFrame.Visible = false
+M.ttFrame.Active = false
+M.ttFrame.Parent = M.ttGui
+Instance.new("UICorner", M.ttFrame).CornerRadius = UDim.new(0, 8)
+local ttStk = Instance.new("UIStroke", M.ttFrame); ttStk.Color = M.C_RED; ttStk.Thickness = 1.8
+
+M.ttLbl = Instance.new("TextLabel")
+M.ttLbl.Size = UDim2.new(1,-12,1,-12); M.ttLbl.Position = UDim2.new(0,6,0,6)
+M.ttLbl.BackgroundTransparency = 1; M.ttLbl.TextColor3 = M.C_TEXT
+M.ttLbl.Font = Enum.Font.Gotham; M.ttLbl.TextSize = 11
+M.ttLbl.TextXAlignment = Enum.TextXAlignment.Left; M.ttLbl.TextYAlignment = Enum.TextYAlignment.Top
+M.ttLbl.TextWrapped = true; M.ttLbl.Parent = M.ttFrame
+
+M.ttConn = nil
+M.attached = setmetatable({}, {__mode="k"})
+
+local function showTip(name, side)
+    local v = getVal(name)
+    if v <= 0 then return end
+    M.ttLbl.Text = string.format("%s\n─────────────\n💰 %s  |  📈 %d/10\n─────────────\n%s",
+        name, fmt(v), getDemand(name), predText(name))
+    M.ttFrame.Visible = true
+    local function upd()
+        local m = UIS:GetMouseLocation()
+        local vp = Vector2.new(1920,1080)
+        if workspace.CurrentCamera then vp = workspace.CurrentCamera.ViewportSize end
+        M.ttFrame.Position = UDim2.fromOffset(math.max(0, math.min(m.X + 15, vp.X - 300)), math.max(0, math.min(m.Y + 15, vp.Y - 180)))
+    end
+    upd()
+    if M.ttConn then M.ttConn:Disconnect() end
+    M.ttConn = UIS.InputChanged:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseMovement then upd() end
+    end)
+end
+
+local function hideTip()
+    M.ttFrame.Visible = false
+    if M.ttConn then M.ttConn:Disconnect(); M.ttConn = nil end
+end
+
+local function attachTips(folder, side)
+    if not folder or not folder.Parent then return end
+    for _, o in ipairs(folder:GetDescendants()) do
+        if o:IsA("TextLabel") and o.Visible and not M.attached[o] then
+            local bn = parseStack(o.Text)
+            if getVal(bn) > 0 then
+                M.attached[o] = true
+                o.MouseEnter:Connect(function() showTip(bn, side) end)
+                o.MouseLeave:Connect(hideTip)
+                local p = o.Parent
+                if p and p:IsA("GuiObject") and not M.attached[p] then
+                    M.attached[p] = true
+                    p.MouseEnter:Connect(function() showTip(bn, side) end)
+                    p.MouseLeave:Connect(hideTip)
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- UPDATES
+-- ============================================================
+local function updateStats()
+    local t = string.format("📊 %d trades | Lucro: %s", M.stats.trades, fmt(M.stats.profit))
+    if M.stats.wins > 0 or M.stats.losses > 0 then
+        t = t .. string.format(" (%d✔/%d✖)", M.stats.wins, M.stats.losses)
+    end
+    M.lblStats.Text = t
+    if M.stats.profit > 0 then M.lblStats.TextColor3 = M.C_GREEN
+    elseif M.stats.profit < 0 then M.lblStats.TextColor3 = M.C_RED_BRIGHT
+    else M.lblStats.TextColor3 = M.C_TEXT_DIM end
+end
+
+local function updateBL()
+    local items = {}
+    for k in pairs(M.blacklist) do table.insert(items, k) end
+    M.lblBL.Text = #items == 0 and "🚫 Blacklist vazia" or "🚫 " .. table.concat(items, ", ")
+end
+
+local function updPersonal()
+    if M.personalStats.tradesCount == 0 then
+        M.lblPersonal.Text = "📊 Sem trades ainda"
+        return
+    end
+    local avg = M.personalStats.profitSum / M.personalStats.tradesCount
+    local wr = M.stats.trades > 0 and (M.stats.wins/M.stats.trades*100) or 0
+    local tops = {}
+    for k, c in pairs(M.personalStats.itemsTraded) do table.insert(tops, {n=k, c=c}) end
+    table.sort(tops, function(a,b) return a.c > b.c end)
+    local top3 = {}
+    for i = 1, math.min(3, #tops) do table.insert(top3, string.format("%s (%dx)", tops[i].n, tops[i].c)) end
+    M.lblPersonal.Text = string.format("🏆 Melhor: %s\n💀 Pior: %s\n📊 Média: %s\n✅ %d✔ / %d✖ (%.0f%%)\n🔥 Top: %s",
+        fmt(M.personalStats.best.profit), fmt(M.personalStats.worst.profit), fmt(avg),
+        M.stats.wins, M.stats.losses, wr,
+        #top3 > 0 and table.concat(top3, ", ") or "—")
+end
+
+local function updFlip()
+    if M.stats.trades == 0 then M.lblFlip.Text = "⏳ Aguardando..."; return end
+    local el = math.max(1, tick() - M.flip.time)
+    local tD = M.stats.trades - M.flip.count
+    local pD = M.stats.profit - M.flip.profit
+    if tD == 0 then M.lblFlip.Text = "⏳ Aguardando..."; return end
+    local avg = pD / tD
+    local tpm = tD / (el / 60)
+    local hr = avg * tpm * 60
+    M.lblFlip.Text = string.format("📈 Média: %s/trade\n⚡ %.1f trades/min\n💰 Lucro/h: %s\n📅 Dia: %s\n🏆 Semana: %s",
+        fmt(avg), tpm, fmt(hr), fmt(hr*4), fmt(hr*4*7))
+end
+
+local function refreshAlerts()
+    for _, c in ipairs(M.alertList:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    for i, a in ipairs(M.priceAlerts) do
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1,-8,0,34)
+        row.BackgroundColor3 = a.triggered and Color3.fromRGB(30,50,30) or Color3.fromRGB(25,20,25)
+        row.BorderSizePixel = 0
+        row.LayoutOrder = i
+        row.Parent = M.alertList
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 4)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1,-40,1,0)
+        lbl.Position = UDim2.new(0,6,0,0)
+        lbl.BackgroundTransparency = 1
+        local cmp = a.type == "below" and "≤" or "≥"
+        local icon = a.triggered and "✓" or "⏳"
+        lbl.Text = string.format("%s %s %s %s", icon, a.item, cmp, fmt(a.threshold))
+        lbl.TextColor3 = a.triggered and M.C_GREEN or M.C_TEXT
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextSize = 10
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = row
+        local rm = Instance.new("TextButton")
+        rm.Size = UDim2.new(0,26,0,26)
+        rm.Position = UDim2.new(1,-30,0.5,-13)
+        rm.BackgroundColor3 = Color3.fromRGB(80,20,20)
+        rm.Text = "✖"
+        rm.TextColor3 = M.C_RED_BRIGHT
+        rm.Font = Enum.Font.GothamBlack
+        rm.TextSize = 12
+        rm.BorderSizePixel = 0
+        rm.Parent = row
+        Instance.new("UICorner", rm).CornerRadius = UDim.new(0, 4)
+        rm.MouseButton1Click:Connect(function()
+            table.remove(M.priceAlerts, i)
+            refreshAlerts()
+        end)
+    end
+end
+
+local function resetUI()
+    M.lblYour.Text = "SEU: 0"; M.lblTheir.Text = "DELES: 0"
+    M.lblMaxY.Text = "Mais caro: —"; M.lblMaxT.Text = "Mais caro: —"
+    M.lblDemY.Text = "Demanda: 1/10"; M.lblDemT.Text = "Demanda: 1/10"
+    M.lblDiff.Text = "Diferença: 0"; M.lblDiff.TextColor3 = M.C_TEXT
+    M.lblStatus.Text = "Aguardando trade..."; M.lblStatus.TextColor3 = M.C_TEXT_DIM
+    M.btnNW.Text = "◈ CALCULAR NET WORTH"
+end
+
+-- CompleteTrade
+pcall(function()
+    if not M.TradeFolder then return end
+    local ct = M.TradeFolder:FindFirstChild("CompleteTrade")
+    if not ct then return end
+    ct.OnClientEvent:Connect(function()
+        if M.lastMyVal > 0 or M.lastTheirVal > 0 then
+            local p = M.lastTheirVal - M.lastMyVal
+            M.stats.trades = M.stats.trades + 1
+            M.stats.profit = M.stats.profit + p
+            if p > 0 then M.stats.wins = M.stats.wins + 1
+            elseif p < 0 then M.stats.losses = M.stats.losses + 1 end
+            updateStats()
+            local ps = M.personalStats
+            ps.tradesCount = ps.tradesCount + 1
+            ps.profitSum = ps.profitSum + p
+            if p > ps.best.profit then ps.best = {profit=p, time=os.date("%H:%M")} end
+            if ps.tradesCount == 1 or p < ps.worst.profit then ps.worst = {profit=p, time=os.date("%H:%M")} end
+            if M.flip.count == 0 then M.flip = {time=tick(), profit=M.stats.profit-p, count=M.stats.trades-1} end
+            M.lastMyVal = 0
+            M.lastTheirVal = 0
+        end
+    end)
+end)
+
+-- ============================================================
+-- HANDLERS
+-- ============================================================
+M.btnNW.MouseButton1Click:Connect(function()
+    M.btnNW.Text = "◈ Lendo..."
+    task.spawn(function()
+        task.wait(0.2)
+        local inv = getInv()
+        local tot = 0
+        for _, n in ipairs(inv) do tot = tot + getVal(n) end
+        if tot > 0 then
+            M.btnNW.Text = "◈ Mochila: " .. fmt(tot) .. " (" .. #inv .. ")"
+            M.btnNW.TextColor3 = M.C_GREEN
+        else
+            M.btnNW.Text = "◈ Falha"
+            M.btnNW.TextColor3 = M.C_RED_BRIGHT
+        end
+    end)
+end)
+
+M.btnAR.MouseButton1Click:Connect(function()
+    M.autoRejectLowball = not M.autoRejectLowball
+    if M.autoRejectLowball then
+        M.btnAR.Text = "☑ Rejeitar Lowball (< 50%)"
+        M.btnAR.TextColor3 = M.C_GREEN
+    else
+        M.btnAR.Text = "☐ Rejeitar Lowball (< 50%)"
+        M.btnAR.TextColor3 = M.C_TEXT_DIM
+    end
+end)
+
+M.btnDup.MouseButton1Click:Connect(function()
+    M.onlyDuplicates = not M.onlyDuplicates
+    if M.onlyDuplicates then
+        M.btnDup.Text = "☑ Só duplicados (2+)"
+        M.btnDup.TextColor3 = M.C_GREEN
+    else
+        M.btnDup.Text = "☐ Só duplicados (2+)"
+        M.btnDup.TextColor3 = M.C_TEXT_DIM
+    end
+end)
+
+M.btnAddBL.MouseButton1Click:Connect(function()
+    local n = M.inBL.Text
+    if n ~= "" then
+        M.blacklist[n] = true
+        M.inBL.Text = ""
+        updateBL()
+    end
+end)
+
+M.btnTA.MouseButton1Click:Connect(function()
+    if not isOpen() then return end
+    fire(M.AcceptEvt)
+    local g = getTradeGUI()
+    if g then
+        for _, b in ipairs(findBtns(g, ACCEPT_KW)) do clickBtn(b); task.wait(0.1) end
+    end
+    M.lblAuto.Text = "✅ ACCEPT disparado"
+    M.lblAuto.TextColor3 = M.C_GREEN
+end)
+
+M.btnTR.MouseButton1Click:Connect(function()
+    if not isOpen() then return end
+    fire(M.DeclineEvt)
+    local g = getTradeGUI()
+    if g then
+        for _, b in ipairs(findBtns(g, DECLINE_KW)) do clickBtn(b); task.wait(0.1) end
+    end
+    M.lblAuto.Text = "❌ REJECT disparado"
+    M.lblAuto.TextColor3 = M.C_RED_BRIGHT
+end)
+
+M.btnCmp.MouseButton1Click:Connect(function()
+    local a = M.inA.Text
+    local b = M.inB.Text
+    if a == "" or b == "" then return end
+    M.lblCmp.Text = compareItems(a, b)
+    M.lblCmp.TextColor3 = M.C_TEXT
+end)
+
+M.btnRev.MouseButton1Click:Connect(function()
+    local target = tonumber(M.inTarget.Text)
+    if not target or target <= 0 then M.lblTools.Text = "⚠ Valor inválido"; return end
+    local inv = getInv()
+    local counts = {}
+    for _, n in ipairs(inv) do counts[n] = (counts[n] or 0) + 1 end
+    local list = {}
+    for n, c in pairs(counts) do
+        if not M.blacklist[n] then
+            table.insert(list, {name=n, value=getVal(n), count=c})
+        end
+    end
+    table.sort(list, function(a,b) return a.value > b.value end)
+    local best, bestSum = nil, -1
+    local function search(combo, sum, si)
+        if sum <= target and sum > bestSum then
+            bestSum = sum
+            best = {}
+            for _, it in ipairs(combo) do table.insert(best, it.name) end
+        end
+        if sum == target or #combo >= 4 then return end
+        for i = si, #list do
+            local it = list[i]
+            if it.count > 0 and sum + it.value <= target then
+                it.count = it.count - 1
+                table.insert(combo, it)
+                search(combo, sum + it.value, i)
+                table.remove(combo)
+                it.count = it.count + 1
+            end
+        end
+    end
+    search({}, 0, 1)
+    if best and #best > 0 then
+        M.lblTools.Text = string.format("🎯 %s → %s (%s)", fmt(target), table.concat(best, " + "), fmt(bestSum))
+        M.lblTools.TextColor3 = M.C_GREEN
+    else
+        M.lblTools.Text = "⚠ Nada encontrado"
+        M.lblTools.TextColor3 = M.C_RED_BRIGHT
+    end
+end)
+
+M.btnAType.MouseButton1Click:Connect(function()
+    M.alertType = M.alertType == "above" and "below" or "above"
+    if M.alertType == "above" then
+        M.btnAType.Text = "acima ▴"
+        M.btnAType.TextColor3 = M.C_GREEN
+    else
+        M.btnAType.Text = "abaixo ▾"
+        M.btnAType.TextColor3 = M.C_RED_BRIGHT
+    end
+end)
+
+M.btnAddAlert.MouseButton1Click:Connect(function()
+    local item = M.inAItem.Text
+    local v = tonumber(M.inAVal.Text)
+    if item == "" or not v or v <= 0 then return end
+    table.insert(M.priceAlerts, {item=getExact(item), type=M.alertType, threshold=v, triggered=false})
+    M.inAItem.Text = ""
+    M.inAVal.Text = ""
+    refreshAlerts()
+    M.lblAuto.Text = "🔔 Alerta adicionado"
+    M.lblAuto.TextColor3 = M.C_GREEN
+end)
+
+-- Presets
+for i = 1, 3 do
+    local slot = i
+    M.pSaves[slot].MouseButton1Click:Connect(function()
+        local txt = M.pInputs[slot].Text
+        if not txt or txt == "" then return end
+        M.presetTexts[slot] = txt
+        M.pLoads[slot].BackgroundColor3 = Color3.fromRGB(30,100,40)
+        M.lblAuto.Text = "💾 Slot " .. slot .. " salvo"
+        M.lblAuto.TextColor3 = M.C_GREEN
+    end)
+    M.pLoads[slot].MouseButton1Click:Connect(function()
+        if not M.presetTexts[slot] then return end
+        local o = isOpen()
+        if not o then M.lblAuto.Text = "⚠ Abra trade"; return end
+        local parts = {}
+        local n = M.presetTexts[slot]:gsub("%s+and%s+", ","):gsub("%s+e%s+", ",")
+        for p in n:gmatch("[^,]+") do table.insert(parts, p) end
+        task.spawn(function()
+            local added = 0
+            for _, p in ipairs(parts) do
+                p = p:match("^%s*(.-)%s*$")
+                local qty, nm = 1, p
+                local m1, q1 = p:match("^(.-)%s*x%s*(%d+)$")
+                if m1 and q1 then nm = m1; qty = tonumber(q1)
+                else
+                    local q2, m2 = p:match("^(%d+)%s*x%s*(.+)$")
+                    if q2 and m2 then qty = tonumber(q2); nm = m2 end
+                end
+                nm = getExact(nm:match("^%s*(.-)%s*$"))
+                if getVal(nm) > 0 then
+                    for _ = 1, qty do
+                        local o2, mf2 = isOpen()
+                        if not o2 then break end
+                        local before = folderStats(mf2)
+                        pcall(function() M.OfferEvt:FireServer(nm) end)
+                        for _ = 1, 8 do
+                            task.wait(0.15)
+                            if folderStats(mf2) > before then added = added + 1; break end
+                        end
+                    end
+                end
+            end
+            M.lblAuto.Text = string.format("✔ Slot %d: %d itens", slot, added)
+            M.lblAuto.TextColor3 = M.C_GREEN
         end)
     end)
-
-    task.wait(CONFIG.FlingDuration)
-    conn:Disconnect()
-    pcall(function() bv:Destroy() end)
-    pcall(function() bav:Destroy() end)
-    dbg("FLING → " .. (targetChar.Name or "?"))
-    return true
+    M.pLoads[slot].InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton2 then
+            M.presetTexts[slot] = nil
+            M.pInputs[slot].Text = ""
+            M.pLoads[slot].BackgroundColor3 = Color3.fromRGB(50,50,50)
+        end
+    end)
 end
 
--- ================== DETECTAR MURDER ==================
-local function isPlayerMurderer(player)
-    if not player or player == LocalPlayer then return false end
-    local char = player.Character
-    if not char then return false end
-    local function check(c)
-        if not c then return false end
-        for _, t in ipairs(c:GetChildren()) do
-            if t:IsA("Tool") and t.Name:lower():find("knife") then return true end
+-- Generate
+local function genOffer()
+    if M.isGenerating or not isSafe() then return end
+    local o, _, tf = isOpen()
+    if not o then M.lblAuto.Text = "⚠ Abra trade"; return end
+    if not M.OfferEvt then M.lblAuto.Text = "⚠ Remote não achado"; return end
+    local _, tV = folderStats(tf)
+    if tV <= 0 then M.lblAuto.Text = "⚠ Parceiro sem itens"; return end
+    M.isGenerating = true
+    M.lblAuto.Text = "🔍 Calculando..."
+    task.spawn(function()
+        local inv = getInv()
+        local counts = {}
+        for _, n in ipairs(inv) do counts[n] = (counts[n] or 0) + 1 end
+        local list = {}
+        for n, c in pairs(counts) do
+            if not M.blacklist[n] and (not M.onlyDuplicates or c >= 2) then
+                table.insert(list, {name=n, value=getVal(n), count=c})
+            end
         end
+        table.sort(list, function(a,b) return a.value > b.value end)
+        local best, bestSum = nil, -1
+        local function search(combo, sum, si)
+            if sum <= tV and sum > bestSum then
+                bestSum = sum
+                best = {}
+                for _, it in ipairs(combo) do table.insert(best, it.name) end
+            end
+            if sum == tV or #combo >= 4 then return end
+            for i = si, #list do
+                local it = list[i]
+                if it.count > 0 and sum + it.value <= tV then
+                    it.count = it.count - 1
+                    table.insert(combo, it)
+                    search(combo, sum + it.value, i)
+                    table.remove(combo)
+                    it.count = it.count + 1
+                end
+            end
+        end
+        search({}, 0, 1)
+        if not best or #best == 0 then
+            M.lblAuto.Text = "⚠ Sem itens"
+            M.isGenerating = false
+            return
+        end
+        M.lblAuto.Text = "🧹 Limpando..."
+        local safety = 0
+        while M.isGenerating and isSafe() do
+            local oo, mf = isOpen()
+            if not oo then M.isGenerating = false; return end
+            if folderStats(mf) <= 0 or safety >= 20 then break end
+            safety = safety + 1
+            local f = nil
+            for _, obj in ipairs(mf:GetDescendants()) do
+                if obj:IsA("GuiObject") and obj.Visible then
+                    local t = (obj:IsA("TextLabel") and obj.Text) or obj.Name or ""
+                    local bn = parseStack(t)
+                    if getVal(bn) > 0 then f = bn; break end
+                end
+            end
+            if not f then break end
+            if M.RemoveEvt then pcall(function() M.RemoveEvt:FireServer(getExact(f)) end) end
+            task.wait(0.2)
+        end
+        M.lblAuto.Text = "✔ Adicionando..."
+        local fs = 0
+        for _, n in ipairs(best) do
+            local oo, mf = isOpen()
+            if not oo then M.isGenerating = false; return end
+            local before = folderStats(mf)
+            pcall(function() M.OfferEvt:FireServer(getExact(n)) end)
+            for _ = 1, 8 do
+                task.wait(0.15)
+                if folderStats(mf) > before then fs = fs + getVal(n); break end
+            end
+        end
+        M.lblAuto.Text = string.format("✔ Seu: %s | Deles: %s\nLucro: %s", fmt(fs), fmt(tV), fmt(tV - fs))
+        M.lblAuto.TextColor3 = M.C_GREEN
+        M.isGenerating = false
+    end)
+end
+
+M.btnGen.MouseButton1Click:Connect(genOffer)
+
+M.btnClr.MouseButton1Click:Connect(function()
+    if M.isClearing or not isSafe() then return end
+    local o = isOpen()
+    if not o then return end
+    M.isClearing = true
+    task.spawn(function()
+        local safety = 0
+        while M.isClearing and isSafe() do
+            local oo, mf = isOpen()
+            if not oo then M.isClearing = false; return end
+            safety = safety + 1
+            if safety >= 40 or folderStats(mf) <= 0 then break end
+            local f = nil
+            for _, obj in ipairs(mf:GetDescendants()) do
+                if obj:IsA("GuiObject") and obj.Visible then
+                    local t = (obj:IsA("TextLabel") and obj.Text) or obj.Name or ""
+                    local bn = parseStack(t)
+                    if getVal(bn) > 0 then f = bn; break end
+                end
+            end
+            if f and M.RemoveEvt then
+                pcall(function() M.RemoveEvt:FireServer(getExact(f)) end)
+                task.wait(0.2)
+            end
+        end
+        M.isClearing = false
+    end)
+end)
+
+-- Tools Functions
+local function getPlayerWealth(p)
+    local ls = p:FindFirstChild("leaderstats")
+    if ls then
+        for _, n in ipairs({"Value","Coins","Money","Cash","Wealth","Gems","Wins"}) do
+            local s = ls:FindFirstChild(n)
+            if s and typeof(s.Value) == "number" then return s.Value, "leaderstats:"..n end
+        end
+    end
+    local st = p:FindFirstChild("Stats") or p:FindFirstChild("PlayerStats")
+    if st then
+        for _, n in ipairs({"Value","Coins","Money","Cash"}) do
+            local s = st:FindFirstChild(n)
+            if s and typeof(s.Value) == "number" then return s.Value, "stats:"..n end
+        end
+    end
+    return 0, "unknown"
+end
+
+local function sendAndWait(targetPlayer, index, total)
+    if not targetPlayer or not targetPlayer.Parent then return false end
+    
+    local remote = getSendTradeRemote()
+    if not remote then
+        M.lblTools.Text = "⚠ Remote SendTradeRequest NÃO encontrado no jogo."
+        M.lblTools.TextColor3 = M.C_RED_BRIGHT
         return false
     end
-    if check(player:FindFirstChild("Backpack")) then return true end
-    if check(char) then return true end
-    local r = player:FindFirstChild("Role")
-    if r and r:IsA("StringValue") and r.Value:lower() == "murderer" then return true end
-    return false
-end
-local function findMurderer()
-    for _, p in ipairs(Players:GetPlayers()) do
-        if isPlayerMurderer(p) then return p end
-    end
-    return nil
-end
-
--- ================== PAPEL ==================
-local function getRole()
-    local r = LocalPlayer:FindFirstChild("Role") or workspace:FindFirstChild(LocalPlayer.Name .. "_Role")
-    if r and r:IsA("StringValue") then return r.Value:lower() end
-    local bp = LocalPlayer:FindFirstChild("Backpack")
-    if bp then
-        for _, t in ipairs(bp:GetChildren()) do
-            if t.Name:lower():find("knife") then return "murderer" end
-            if t.Name:lower():find("gun") or t.Name:lower():find("revolver") then return "sheriff" end
+    
+    local success, err = false, ""
+    if remote:IsA("RemoteEvent") then
+        success, err = pcall(function() remote:FireServer(targetPlayer) end)
+        if not success then
+            success, err = pcall(function() remote:FireServer(targetPlayer.Name) end)
         end
-    end
-    return "innocent"
-end
-
--- ================== ATAQUE POR TELEPORTE ==================
-local function attackMurder(myID)
-    local role = getRole()
-    if role == "murderer" then return end
-
-    local murderer = findMurderer()
-    if not murderer then
-        dbg("Murder não encontrado")
-        return
-    end
-    local mchar = murderer.Character
-    local mhrp = mchar and mchar:FindFirstChild("HumanoidRootPart")
-    if not mhrp then return end
-
-    dbg("Teleportando até " .. murderer.Name .. " p/ fling")
-    -- TELEPORTE (atravessa paredes)
-    if not teleportTo(mhrp.Position) then return end
-    task.wait(0.05)
-    if shouldStop(myID) then return end
-
-    if role == "sheriff" then
-        local gun = LocalPlayer.Backpack and LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
-        if gun then pcall(function() gun:Activate() end); task.wait(0.05) end
-    end
-
-    flingTarget(mchar)
-
-    -- re-tenta 3x com teleporte novo (caso murder ande)
-    for i = 1, 3 do
-        task.wait(0.4)
-        if shouldStop(myID) then return end
-        if not mchar or not mchar.Parent then break end
-        local h = mchar:FindFirstChildOfClass("Humanoid")
-        if h and h.Health <= 0 then break end
-        local th = mchar:FindFirstChild("HumanoidRootPart")
-        if not th then break end
-        teleportTo(th.Position)
-        task.wait(0.05)
-        flingTarget(mchar)
-    end
-end
-
--- ================== LOOP PRINCIPAL ==================
-local function stepFarm(myID)
-    if shouldStop(myID) then return end
-    if not getHRP() then task.wait(0.5); return end
-
-    -- 🏠 LOBBY → teleporta e flinga o murder
-    if isInLobby() then
-        local murderer = findMurderer()
-        if murderer then
-            dbg("Lobby → teleporte + fling")
-            attackMurder(myID)
-            task.wait(1.5)
-        else
-            dbg("Lobby, murder não encontrado")
-            task.wait(1.5)
-        end
-        return
-    end
-
-    -- 🎮 ROUND → cheio? fling
-    if isInventoryFull() then
-        attackMurder(myID)
-        task.wait(CONFIG.CheckInterval)
-        return
-    end
-
-    -- 🪙 ROUND → coletar moedas
-    local coin, dist = getNearestCoin()
-    if coin then
-        dbg(string.format("Coletando (%.0f studs)", dist or 0))
-        local ok = collectCoin(coin, myID)
-        if shouldStop(myID) then return end
-        if ok then
-            dbg("Moeda coletada ✔")
-        else
-            blacklist[coin] = tick()
-            dbg("Moeda não coletou → blacklist")
-        end
-        task.wait(0.05)
     else
-        dbg("Nenhuma moeda no mapa...")
-        task.wait(0.8)
+        success, err = pcall(function() remote:InvokeServer(targetPlayer) end)
+        if not success then
+            success, err = pcall(function() remote:InvokeServer(targetPlayer.Name) end)
+        end
     end
+    
+    if not success then
+        M.lblTools.Text = string.format("❌ Erro ao enviar para %s:\n%s\nTentando próximo...", targetPlayer.Name, tostring(err))
+        M.lblTools.TextColor3 = M.C_RED_BRIGHT
+        task.wait(2)
+        return false
+    end
+    
+    -- Espera 25 segundos
+    local waitTime = 25
+    local timer = 0
+    local accepted = false
+    
+    while timer < waitTime and M.isSendingRequests do
+        task.wait(0.5)
+        timer = timer + 0.5
+        
+        if isOpen() then
+            accepted = true
+            break
+        end
+    end
+    
+    if accepted then
+        M.lblTools.Text = string.format("💎 %s ACEITOU!\nPausando envio para negociar.", targetPlayer.Name)
+        M.lblTools.TextColor3 = M.C_GREEN
+        M.isSendingRequests = false
+    else
+        M.lblTools.Text = string.format("💎 [%d/%d] %s ignorou/recusou.\nIndo para o próximo...", index, total, targetPlayer.Name)
+        M.lblTools.TextColor3 = M.C_TEXT_DIM
+    end
+    return accepted
 end
 
-local function startLoop()
-    runID = runID + 1
-    local myID = runID
-    isRunning = true
+local function runRichest()
+    local remote = getSendTradeRemote()
+    if not remote then
+        M.lblTools.Text = "⚠ Remote SendTradeRequest NÃO encontrado."
+        M.lblTools.TextColor3 = M.C_RED_BRIGHT
+        return
+    end
+    if M.isSendingRequests then
+        M.lblTools.Text = "💎 Já está enviando... (aguarde)"
+        M.lblTools.TextColor3 = M.C_YELLOW
+        return
+    end
+    M.isSendingRequests = true
+    
+    M.lblTools.Text = "💎 Coletando os 5 mais ricos do servidor..."
+    M.lblTools.TextColor3 = M.C_YELLOW
+    
     task.spawn(function()
-        dbg("Farm iniciado (gen " .. myID .. ")")
-        while not shouldStop(myID) do
-            local ok, err = pcall(stepFarm, myID)
-            if not ok then
-                dbg("Erro (recuperado): " .. tostring(err))
-                task.wait(0.5)
+        local list = {}
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LP and pl.Character then
+                local w, src = getPlayerWealth(pl)
+                table.insert(list, {player=pl, wealth=w, age=pl.AccountAge or 0, src=src})
             end
-            RunService.Heartbeat:Wait()
         end
-        if myID == runID then
-            isRunning = false
-            dbg("Farm parado (gen " .. myID .. ")")
+        table.sort(list, function(a,b)
+            if a.wealth ~= b.wealth then return a.wealth > b.wealth end
+            return a.age > b.age
+        end)
+        
+        if #list == 0 then
+            M.lblTools.Text = "💎 Nenhum jogador disponível."
+            M.lblTools.TextColor3 = M.C_TEXT_DIM
+            M.isSendingRequests = false
+            return
+        end
+        
+        local limit = math.min(#list, 5)
+        
+        for i = 1, limit do
+            if not M.isSendingRequests then break end
+            local entry = list[i]
+            local pl = entry.player
+            if pl.Parent and pl.Character then
+                M.lblTools.Text = string.format("💎 Enviando [%d/%d] → %s\n(Esperando 25s...)", i, limit, pl.Name)
+                M.lblTools.TextColor3 = M.C_YELLOW
+                sendAndWait(pl, i, limit)
+            end
+        end
+        
+        if M.isSendingRequests then
+            M.lblTools.Text = "💎 Terminou o envio para os TOP 5."
+            M.lblTools.TextColor3 = M.C_TEXT_DIM
+            M.isSendingRequests = false
         end
     end)
 end
 
-local function stopLoop()
-    CONFIG.AutoFarmEnabled = false
-    runID = runID + 1
-    isRunning = false
-    COLLECTING_COIN = false
-    local hrp = getHRP()
-    if hrp and hrp.Parent then hrp.Anchored = false end
-    local hum = getHum()
-    if hum then hum.WalkSpeed = 16 end
-    setNoclip(false)
-    dbg("STOP forçado")
+local function runPredator()
+    local remote = getSendTradeRemote()
+    if not remote then
+        M.lblTools.Text = "⚠ Remote SendTradeRequest NÃO encontrado."
+        M.lblTools.TextColor3 = M.C_RED_BRIGHT
+        return
+    end
+    if M.isSendingRequests then
+        M.lblTools.Text = "🦁 Já está enviando... (aguarde)"
+        M.lblTools.TextColor3 = M.C_YELLOW
+        return
+    end
+    M.isSendingRequests = true
+    
+    M.lblTools.Text = "🦁 Escaneando contas novas..."
+    M.lblTools.TextColor3 = M.C_YELLOW
+    task.spawn(function()
+        local list = {}
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LP and pl.Character then
+                local age = pl.AccountAge or 9999
+                if age <= 30 then
+                    table.insert(list, {player=pl, age=age})
+                end
+            end
+        end
+        table.sort(list, function(a,b) return a.age < b.age end)
+        
+        if #list == 0 then
+            M.lblTools.Text = "🦁 Nenhuma conta nova (<=30 dias) encontrada."
+            M.lblTools.TextColor3 = M.C_TEXT_DIM
+            M.isSendingRequests = false
+            return
+        end
+        
+        for i, entry in ipairs(list) do
+            if not M.isSendingRequests then break end
+            local pl = entry.player
+            if pl.Parent and pl.Character then
+                M.lblTools.Text = string.format("🦁 Enviando [%d/%d] → %s (%dd)\n(Esperando 25s...)", i, #list, pl.Name, entry.age)
+                M.lblTools.TextColor3 = M.C_YELLOW
+                sendAndWait(pl, i, #list)
+            end
+        end
+        
+        if M.isSendingRequests then
+            M.lblTools.Text = "🦁 Terminou a lista de contas novas."
+            M.lblTools.TextColor3 = M.C_TEXT_DIM
+            M.isSendingRequests = false
+        end
+    end)
 end
 
--- ================== WATCHDOG ==================
+local function runArbitrage()
+    local o, mf, tf = isOpen()
+    if not o then
+        M.lblTools.Text = "🔮 Abra uma trade com itens dos dois lados primeiro."
+        M.lblTools.TextColor3 = M.C_YELLOW
+        return
+    end
+    local mV = folderFull(mf)
+    local tV = folderFull(tf)
+    if mV <= 0 or tV <= 0 then
+        M.lblTools.Text = "🔮 Precisa haver itens nos DOIS lados da trade."
+        M.lblTools.TextColor3 = M.C_YELLOW
+        return
+    end
+    local diff = tV - mV
+    local pct = (diff / mV) * 100
+    local icon, msg, col
+    if diff > 0 and pct >= 20 then
+        icon, msg, col = "🟢", string.format("ARBITRAGE ENCONTRADA!\nLucro: +%s (+%.0f%%)\nDeles: %s\nSeu: %s\n→ ACEITE AGORA", fmt(diff), pct, fmt(tV), fmt(mV)), M.C_GREEN
+    elseif diff > 0 then
+        icon, msg, col = "🟡", string.format("Lucro pequeno: +%s (+%.0f%%)\nDeles: %s | Seu: %s\n→ Aceitável, mas não ideal", fmt(diff), pct, fmt(tV), fmt(mV)), M.C_YELLOW
+    elseif diff < 0 then
+        icon, msg, col = "🔴", string.format("PREJUÍZO: %s (%.0f%%)\nDeles: %s | Seu: %s\n→ NÃO ACEITE", fmt(diff), pct, fmt(tV), fmt(mV)), M.C_RED_BRIGHT
+    else
+        icon, msg, col = "⚖", "Trade justa (0% lucro).", M.C_TEXT
+    end
+    M.lblTools.Text = icon .. " " .. msg
+    M.lblTools.TextColor3 = col
+end
+
+-- Tools Connections
+M.btnAutoAcc.MouseButton1Click:Connect(function()
+    M.autoAcceptProfit = not M.autoAcceptProfit
+    if M.autoAcceptProfit then
+        M.btnAutoAcc.Text = "☑ AUTO-ACCEPT passivo (lucro >= " .. M.AUTO_MIN .. ")"
+        M.btnAutoAcc.TextColor3 = M.C_GREEN
+    else
+        M.btnAutoAcc.Text = "☐ AUTO-ACCEPT passivo (lucro >= " .. M.AUTO_MIN .. ")"
+        M.btnAutoAcc.TextColor3 = M.C_TEXT_DIM
+    end
+end)
+
+M.btnPredator.MouseButton1Click:Connect(function()
+    M.lblTools.TextColor3 = M.C_TEXT
+    pcall(runPredator)
+end)
+
+M.btnArbitrage.MouseButton1Click:Connect(function()
+    M.lblTools.TextColor3 = M.C_TEXT
+    pcall(runArbitrage)
+end)
+
+M.btnRichest.MouseButton1Click:Connect(function()
+    M.lblTools.TextColor3 = M.C_TEXT
+    pcall(runRichest)
+end)
+
+-- TopBar Buttons
+btnPred.MouseButton1Click:Connect(function()
+    setTab(4)
+    task.wait(0.1)
+    pcall(runPredator)
+end)
+btnArb.MouseButton1Click:Connect(function()
+    setTab(1)
+    task.wait(0.1)
+    pcall(runArbitrage)
+end)
+btnMM.MouseButton1Click:Connect(function()
+    setTab(1)
+    task.wait(0.1)
+    pcall(runRichest)
+end)
+btnHot.MouseButton1Click:Connect(function()
+    setTab(1)
+    local inv = getInv()
+    local tot = 0
+    for _, n in ipairs(inv) do tot = tot + getVal(n) end
+    M.lblTools.Text = "🔥 Seu inventário: " .. fmt(tot) .. " (" .. #inv .. " itens)"
+    M.lblTools.TextColor3 = M.C_YELLOW
+end)
+
+-- Min / Drag / Insert
+local isMin = false
+btnMin.MouseButton1Click:Connect(function()
+    isMin = not isMin
+    if isMin then
+        M.main.Size = UDim2.new(0, 600, 0, 34)
+        M.page1.Visible = false
+        M.page2.Visible = false
+        M.page3.Visible = false
+        M.page4.Visible = false
+        M.tabBar.Visible = false
+        btnMin.Text = "▣"
+    else
+        M.main.Size = UDim2.new(0, 600, 0, 500)
+        M.tabBar.Visible = true
+        btnMin.Text = "—"
+        setTab(1)
+    end
+end)
+
+local drag, ds2, sp2
+M.topBar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        drag = true; ds2 = i.Position; sp2 = M.main.Position
+    end
+end)
+UIS.InputChanged:Connect(function(i)
+    if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - ds2
+        M.main.Position = UDim2.new(sp2.X.Scale, sp2.X.Offset + d.X, sp2.Y.Scale, sp2.Y.Offset + d.Y)
+    end
+end)
+UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then drag = false end
+end)
+
+UIS.InputBegan:Connect(function(i, p)
+    if p then return end
+    if i.KeyCode == Enum.KeyCode.Insert then M.main.Visible = not M.main.Visible end
+    if i.KeyCode == Enum.KeyCode.F and isSafe() then genOffer() end
+end)
+
+-- MACROS
+local macrosCtrl = {
+    [Enum.KeyCode.One] = "Troco Waves por itens melhores!",
+    [Enum.KeyCode.Two] = "WTT my items for Godlys!",
+    [Enum.KeyCode.Three] = "Alguém tem Chroma? Pago bem!",
+    [Enum.KeyCode.Four] = "Vendendo barato, vem!",
+}
+local macrosFn = {
+    [Enum.KeyCode.F2] = "WTT my items for your Godlys! Fast!",
+    [Enum.KeyCode.F3] = "Buying Chromas! Paying well!",
+    [Enum.KeyCode.F4] = "Selling cheap! Come trade!",
+    [Enum.KeyCode.F5] = "Looking for Traveler's Gun! Paying premium!",
+}
+
+UIS.InputBegan:Connect(function(inp, p)
+    if p then return end
+    local ctrl = inp:IsKeyDown(Enum.KeyCode.LeftControl) or inp:IsKeyDown(Enum.KeyCode.RightControl)
+    local txt
+    if ctrl then
+        txt = macrosCtrl[inp.KeyCode]
+    else
+        txt = macrosFn[inp.KeyCode]
+    end
+    if txt then
+        pcall(function() setclipboard(txt) end)
+        pcall(function()
+            VIM:SendKeyEvent(true, Enum.KeyCode.Slash, false, game)
+            VIM:SendKeyEvent(false, Enum.KeyCode.Slash, false, game)
+        end)
+        M.lblAuto.Text = "📋 Copiado! Ctrl+V + Enter"
+        M.lblAuto.TextColor3 = M.C_GREEN
+    end
+end)
+
+-- ============================================================
+-- LOOP PRINCIPAL
+-- ============================================================
+local wasOpen = false
+task.spawn(function()
+    while M.gui.Parent do
+        task.wait(0.15)
+        updateStats()
+        updPersonal()
+        updFlip()
+
+        if isSafe() then
+            local ok, o, mf, tf = pcall(isOpen)
+            if ok and o and mf and tf then
+                wasOpen = true
+                attachTips(mf, "mine")
+                attachTips(tf, "theirs")
+
+                for _, obj in ipairs(mf:GetDescendants()) do
+                    if obj:IsA("TextLabel") and obj.Visible then
+                        local bn = parseStack(obj.Text)
+                        if getVal(bn) > 0 and not M.currentTradeSeen[bn] then
+                            M.currentTradeSeen[bn] = true
+                            recordPrice(bn, getVal(bn), "mine")
+                        end
+                    end
+                end
+                for _, obj in ipairs(tf:GetDescendants()) do
+                    if obj:IsA("TextLabel") and obj.Visible then
+                        local bn = parseStack(obj.Text)
+                        if getVal(bn) > 0 and not M.currentTradeSeen[bn] then
+                            M.currentTradeSeen[bn] = true
+                            recordPrice(bn, getVal(bn), "theirs")
+                        end
+                    end
+                end
+
+                local mV, mD, mN, mX = folderFull(mf)
+                local tV, tD, tN, tX = folderFull(tf)
+                M.lastMyVal = mV
+                M.lastTheirVal = tV
+                M.lblYour.Text = "SEU: " .. fmt(mV)
+                M.lblTheir.Text = "DELES: " .. fmt(tV)
+                M.lblMaxY.Text = mX > 0 and ("Mais caro: " .. mN) or "Mais caro: —"
+                M.lblMaxT.Text = tX > 0 and ("Mais caro: " .. tN) or "Mais caro: —"
+                M.lblDemY.Text = string.format("Demanda: %.1f/10", mD)
+                M.lblDemT.Text = string.format("Demanda: %.1f/10", tD)
+                M.lblDemY.TextColor3 = demandColor(mD)
+                M.lblDemT.TextColor3 = demandColor(tD)
+
+                local diff = tV - mV
+                local dT = "Diferença: " .. fmt(math.abs(diff))
+                if diff > 0 then
+                    M.lblDiff.Text = dT .. "  (WIN)"
+                    M.lblDiff.TextColor3 = M.C_GREEN
+                    M.lblStatus.Text = "✔ GANHANDO"
+                    M.lblStatus.TextColor3 = M.C_GREEN
+                elseif diff < 0 then
+                    M.lblDiff.Text = dT .. "  (LOSE)"
+                    M.lblDiff.TextColor3 = M.C_RED_BRIGHT
+                    M.lblStatus.Text = "✖ PERDENDO"
+                    M.lblStatus.TextColor3 = M.C_RED_BRIGHT
+                else
+                    M.lblDiff.Text = dT .. "  (FAIR)"
+                    M.lblDiff.TextColor3 = M.C_YELLOW
+                    M.lblStatus.Text = "➖ JUSTA"
+                    M.lblStatus.TextColor3 = M.C_YELLOW
+                end
+
+                if mV > 0 or tV > 0 then
+                    if M.autoAcceptProfit then
+                        pcall(tryAccept, mV, tV)
+                    end
+                    pcall(tryReject, mV, tV)
+                    if mV > 0 and tV > 0 then
+                        local pp = (tV - mV) / mV * 100
+                        if pp >= M.SNIPER_ACCEPT and tick() - M.sniperLastAlertAt >= 3 then
+                            M.sniperLastAlertAt = tick()
+                            playAlert()
+                            M.lastAutoAcceptAt = 0
+                            pcall(tryAccept, mV, tV)
+                        end
+                    end
+                end
+            else
+                if wasOpen then
+                    wasOpen = false
+                    M.currentTradeSeen = {}
+                    hideTip()
+                    resetUI()
+                end
+            end
+        end
+    end
+end)
+
+-- MONITOR DE RESPAWN: mantém a UI viva
 task.spawn(function()
     while true do
         task.wait(1)
         pcall(function()
-            if not CONFIG.AutoFarmEnabled then
-                local hrp = getHRP()
-                if hrp and hrp.Anchored then hrp.Anchored = false end
+            if M.gui and M.gui.Parent ~= PG then
+                M.gui.Parent = PG
             end
-            if CONFIG.AutoFarmEnabled and not isRunning then
-                dbg("Watchdog: reiniciando")
-                startLoop()
+            if M.ttGui and M.ttGui.Parent ~= PG then
+                M.ttGui.Parent = PG
+            end
+            if M.alertSoundObj then
+                local sGui = M.alertSoundObj.Parent
+                if sGui and sGui.Parent ~= PG then
+                    sGui.Parent = PG
+                end
             end
         end)
     end
 end)
 
--- ================== RESPAWN ==================
-LocalPlayer.CharacterAdded:Connect(function(char)
-    dbg("Respawn → aguardando HRP")
-    char:WaitForChild("HumanoidRootPart", 5)
-    task.wait(0.5)
-    if CONFIG.AutoFarmEnabled and not isRunning then startLoop() end
-end)
-LocalPlayer.CharacterRemoving:Connect(function()
-    local hrp = getHRP()
-    if hrp and hrp.Parent then hrp.Anchored = false end
-end)
-
--- ================== INICIA NOCLIP LOOP ==================
-noclipLoop()
-
--- ================== GUI ==================
-local function createGUI()
-    local old = LocalPlayer.PlayerGui:FindFirstChild("MM2FarmGui")
-    if old then old:Destroy() end
-
-    local sg = Instance.new("ScreenGui")
-    sg.Name = "MM2FarmGui"
-    sg.ResetOnSpawn = false
-    sg.Parent = LocalPlayer:WaitForChild("PlayerGui")
-
-    local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 260, 0, 280)
-    frame.Position = UDim2.new(0, 20, 0, 80)
-    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
-    frame.BorderSizePixel = 0
-    frame.Active = true
-    frame.Draggable = true
-    frame.Parent = sg
-    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
-    local st = Instance.new("UIStroke", frame)
-    st.Color = Color3.fromRGB(255, 140, 0)
-    st.Thickness = 2
-
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 0, 28)
-    title.BackgroundColor3 = Color3.fromRGB(255, 140, 0)
-    title.BackgroundTransparency = 0.15
-    title.BorderSizePixel = 0
-    title.Text = "🎃 MM2 Farm + Fling"
-    title.TextColor3 = Color3.new(1, 1, 1)
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 15
-    title.Parent = frame
-    Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
-
-    local close = Instance.new("TextButton")
-    close.Size = UDim2.new(0, 22, 0, 22)
-    close.Position = UDim2.new(1, -26, 0, 3)
-    close.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-    close.BorderSizePixel = 0
-    close.Text = "X"
-    close.TextColor3 = Color3.new(1, 1, 1)
-    close.Font = Enum.Font.GothamBold
-    close.TextSize = 12
-    close.Parent = title
-    Instance.new("UICorner", close).CornerRadius = UDim.new(0, 4)
-    close.MouseButton1Click:Connect(function() stopLoop(); sg:Destroy() end)
-
-    local function mk(y, txt, col)
-        local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(1, -20, 0, 20)
-        l.Position = UDim2.new(0, 10, 0, y)
-        l.BackgroundTransparency = 1
-        l.Text = txt
-        l.TextColor3 = col
-        l.Font = Enum.Font.GothamMedium
-        l.TextSize = 13
-        l.TextXAlignment = Enum.TextXAlignment.Left
-        l.Parent = frame
-        return l
+-- Save periódico
+task.spawn(function()
+    while M.gui.Parent do
+        task.wait(30)
+        pcall(savePreds)
     end
+end)
 
-    local coinLbl = mk(36, "Moedas: 0 / 50", Color3.fromRGB(255, 215, 0))
-    local roleLbl = mk(58, "Papel: --", Color3.fromRGB(200, 200, 255))
-    local lobbyLbl = mk(80, "Local: --", Color3.fromRGB(180, 180, 255))
-    local statusLbl = mk(102, "Status: Parado", Color3.fromRGB(255, 100, 100))
+-- Init
+updateStats()
+updateBL()
+refreshAlerts()
+updPersonal()
+setTab(1)
 
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -20, 0, 34)
-    btn.Position = UDim2.new(0, 10, 0, 128)
-    btn.BackgroundColor3 = Color3.fromRGB(50, 180, 80)
-    btn.BorderSizePixel = 0
-    btn.Text = "▶ INICIAR FARM"
-    btn.TextColor3 = Color3.new(1, 1, 1)
-    btn.Font = Enum.Font.GothamBold
-    btn.TextSize = 13
-    btn.Parent = frame
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-
-    btn.MouseButton1Click:Connect(function()
-        if CONFIG.AutoFarmEnabled then
-            stopLoop()
-            btn.Text = "▶ INICIAR FARM"
-            btn.BackgroundColor3 = Color3.fromRGB(50, 180, 80)
-        else
-            CONFIG.AutoFarmEnabled = true
-            btn.Text = "⏸ PARAR FARM"
-            btn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
-            startLoop()
-        end
-    end)
-
-    local logFrame = Instance.new("Frame")
-    logFrame.Size = UDim2.new(1, -20, 0, 100)
-    logFrame.Position = UDim2.new(0, 10, 0, 172)
-    logFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
-    logFrame.BorderSizePixel = 0
-    logFrame.Parent = frame
-    Instance.new("UICorner", logFrame).CornerRadius = UDim.new(0, 6)
-
-    local logLbl = Instance.new("TextLabel")
-    logLbl.Size = UDim2.new(1, -8, 1, -8)
-    logLbl.Position = UDim2.new(0, 4, 0, 4)
-    logLbl.BackgroundTransparency = 1
-    logLbl.TextColor3 = Color3.fromRGB(150, 255, 150)
-    logLbl.Font = Enum.Font.Code
-    logLbl.TextSize = 10
-    logLbl.TextXAlignment = Enum.TextXAlignment.Left
-    logLbl.TextYAlignment = Enum.TextYAlignment.Top
-    logLbl.TextWrapped = true
-    logLbl.Parent = logFrame
-
-    task.spawn(function()
-        while sg.Parent do
-            pcall(function()
-                coinLbl.Text = string.format("Moedas: %d / %d", getCoinCount(), CONFIG.MaxCoins)
-                local r = getRole()
-                local names = { innocent = "Inocente", sheriff = "Xerife", murderer = "Assassino" }
-                roleLbl.Text = "Papel: " .. (names[r] or r)
-                lobbyLbl.Text = "Local: " .. (isInLobby() and "LOBBY 🏠" or "ROUND 🎮")
-                logLbl.Text = table.concat(log, "\n", 1, math.min(#log, 6))
-                if CONFIG.AutoFarmEnabled and isRunning then
-                    statusLbl.Text = "Status: Rodando"
-                    statusLbl.TextColor3 = Color3.fromRGB(100, 255, 100)
-                else
-                    statusLbl.Text = "Status: Parado"
-                    statusLbl.TextColor3 = Color3.fromRGB(255, 100, 100)
-                end
-            end)
-            task.wait(0.3)
-        end
-    end)
-end
-
-createGUI()
-dbg("GUI carregada. Clique em INICIAR FARM.")
+print("[v44] Carregado — UI agora sobrevive ao respawn (ResetOnSpawn=false + monitor)")
